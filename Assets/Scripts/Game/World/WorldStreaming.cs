@@ -18,7 +18,6 @@ public class WorldStreaming
     {
         public TargetChunk chunk;
         public GameObject obj;
-        
 
         public bool load_complete;
         public JobHandle load_job;
@@ -41,7 +40,9 @@ public class WorldStreaming
         int chunk_id = GetChunkId(position.x, position.z);
         if (chunk_id != m_chunk_id_last)
         {
-            foreach (TargetChunk chunk in GetTargetChunks(chunk_id))
+            List<TargetChunk> chunks = GetTargetChunks(chunk_id);
+
+            foreach (TargetChunk chunk in chunks)
             {
                 LoadedChunk loaded_chunk;
 
@@ -82,7 +83,7 @@ public class WorldStreaming
                 chunk.Value.load_job.Complete();
                 chunk.Value.load_complete = true;
 
-                GameObject chunk_obj = new GameObject(string.Format("WorldChunk_{0}", chunk.Value.chunk.id));
+                GameObject chunk_obj = new GameObject(string.Format("WorldChunk_{0}", chunk.Key));
 
                 Vector2 chunk_pos = GetChunkCoords(chunk.Value.chunk.id);
                 chunk_obj.transform.position = new Vector3(chunk_pos.x, 0.0f, chunk_pos.y);
@@ -90,12 +91,12 @@ public class WorldStreaming
                 MeshRenderer meshRenderer = chunk_obj.AddComponent<MeshRenderer>();
                 meshRenderer.sharedMaterial = new Material(Shader.Find("Universal Render Pipeline/Simple Lit"));
                 //meshRenderer.sharedMaterial.SetTexture("_BaseMap", Resources.Load<Texture>("GrassTexture"));
-                //meshRenderer.sharedMaterial.SetTextureScale("_BaseMap", new Vector2(WorldChunk.CHUNK_SIZE / 2.0f, WorldChunk.CHUNK_SIZE / 2.0f));
+                //meshRenderer.sharedMaterial.SetTextureScale("_BaseMap", new Vector2(WorldChunk.CHUNK_SIZE / 4.0f, WorldChunk.CHUNK_SIZE / 4.0f));
+
                 MeshFilter meshFilter = chunk_obj.AddComponent<MeshFilter>();
                 meshFilter.mesh = WorldChunk.GenerateChunkMesh(chunk.Value.load_heights);
 
                 chunk.Value.load_heights.Dispose();
-
                 chunk.Value.obj = chunk_obj;
             }
         }
