@@ -2,16 +2,12 @@
 using Unity.Collections;
 using Unity.Jobs;
 using UnityEngine;
-using UnityEngine.Assertions;
 
 public class WorldStreaming
 {
-    private const int CHUNKS_PER_ROW = (int)WorldGen.MAX_WORLD_COORDINATE * 2 / WorldChunk.CHUNK_SIZE;
-
     private class TargetChunk
     {
         public int id;
-        public WorldChunk.Lod quality;
     }
 
     private class LoadedChunk
@@ -19,14 +15,19 @@ public class WorldStreaming
         public TargetChunk chunk;
         public GameObject obj;
 
-        public bool load_complete;
+        public bool load_finalized;
         public JobHandle load_job;
-        public NativeArray<float> load_heights;
+        public NativeArray<Vector3> load_verts;
+        public NativeArray<int> load_tris;
+        public NativeArray<Vector2> load_uvs;
+        public NativeArray<Vector3> load_normals;
     }
 
     private Dictionary<int, LoadedChunk> m_loaded_chunks = new Dictionary<int, LoadedChunk>();
 
     private int m_chunk_id_last = -1;
+
+    private const float QUANTUM = 2.0f;
 
     private WorldGen m_world_gen;
 
@@ -50,12 +51,7 @@ public class WorldStreaming
 
                 if (m_loaded_chunks.TryGetValue(chunk.id, out loaded_chunk))
                 {
-                    Assert.IsTrue(loaded_chunk.load_complete);
-
-                    if (loaded_chunk.chunk.quality == chunk.quality)
-                    {
-                        need_load = false;
-                    }
+                    need_load = false;
                 }
                 else
                 {
@@ -66,8 +62,14 @@ public class WorldStreaming
 
                 if (need_load)
                 {
-                    loaded_chunk.load_complete = false;
-                    loaded_chunk.load_job = ScheduleChunkLoad(chunk.id, chunk.quality, out loaded_chunk.load_heights);
+                    loaded_chunk.load_finalized = false;
+                    loaded_chunk.load_job = ScheduleChunkLoad(
+                        chunk.id,
+                        WorldChunk.Lod.FullQuality,
+                        out loaded_chunk.load_verts,
+                        out loaded_chunk.load_tris,
+                        out loaded_chunk.load_uvs,
+                        out loaded_chunk.load_normals);
                 }
             }
 
@@ -76,31 +78,49 @@ public class WorldStreaming
             m_chunk_id_last = chunk_id;
         }
 
+        float time_start = Time.realtimeSinceStartup;
+
         foreach (KeyValuePair<int, LoadedChunk> chunk in m_loaded_chunks)
         {
-            if (!chunk.Value.load_complete && chunk.Value.load_job.IsCompleted)
+            if (!chunk.Value.load_finalized && chunk.Value.load_job.IsCompleted)
             {
                 chunk.Value.load_job.Complete();
-                chunk.Value.load_complete = true;
+                chunk.Value.load_finalized = true;
 
-                GameObject chunk_obj = new GameObject(string.Format("WorldChunk_{0}", chunk.Key));
+                GameObject obj = new GameObject(string.Format("WorldChunk_{0}", chunk.Key));
 
                 Vector2 chunk_pos = GetChunkCoords(chunk.Value.chunk.id);
-                chunk_obj.transform.position = new Vector3(chunk_pos.x, 0.0f, chunk_pos.y);
+                obj.transform.position = new Vector3(chunk_pos.x, 0.0f, chunk_pos.y);
 
-                MeshRenderer meshRenderer = chunk_obj.AddComponent<MeshRenderer>();
-                meshRenderer.sharedMaterial = new Material(Shader.Find("Universal Render Pipeline/Simple Lit"));
-                //meshRenderer.sharedMaterial.SetTexture("_BaseMap", Resources.Load<Texture>("GrassTexture"));
-                //meshRenderer.sharedMaterial.SetTextureScale("_BaseMap", new Vector2(WorldChunk.CHUNK_SIZE / 4.0f, WorldChunk.CHUNK_SIZE / 4.0f));
+                MeshRenderer meshRenderer = obj.AddComponent<MeshRenderer>();
+                meshRenderer.sharedMaterial = Resources.Load<Material>("GrassMaterial");
+                meshRenderer.sharedMaterial.SetTextureScale("_BaseMap", new Vector2(WorldChunk.CHUNK_SIZE / 64.0f, WorldChunk.CHUNK_SIZE / 64.0f));
 
-                MeshFilter meshFilter = chunk_obj.AddComponent<MeshFilter>();
-                meshFilter.mesh = WorldChunk.GenerateChunkMesh(chunk.Value.load_heights);
+                MeshFilter meshFilter = obj.AddComponent<MeshFilter>();
+                meshFilter.mesh = WorldChunk.FinalizeChunkMesh(
+                    chunk.Value.load_verts,
+                    chunk.Value.load_tris,
+                    chunk.Value.load_uvs,
+                    chunk.Value.load_normals);
 
-                chunk.Value.load_heights.Dispose();
-                chunk.Value.obj = chunk_obj;
+                chunk.Value.load_verts.Dispose();
+                chunk.Value.load_tris.Dispose();
+                chunk.Value.load_uvs.Dispose();
+                chunk.Value.load_normals.Dispose();
+
+                chunk.Value.obj = obj;
+            }
+
+            float time_now = Time.realtimeSinceStartup;
+            float time_delta = time_now - time_start;
+            if (time_delta > QUANTUM / 1000.0f)
+            {
+                break;
             }
         }
     }
+
+    private const int CHUNKS_PER_ROW = (int)WorldGen.MAX_WORLD_COORDINATE * 2 / WorldChunk.CHUNK_SIZE;
 
     public static int GetChunkId(float x, float z)
     {
@@ -147,28 +167,8 @@ public class WorldStreaming
         {
             for (float x = top_left.x; x < bottom_right.x; x += WorldChunk.CHUNK_SIZE)
             {
-                int distance_x = (int)(Mathf.Abs(position.x - x) / WorldChunk.CHUNK_SIZE);
-                int distance_z = (int)(Mathf.Abs(position.y - z) / WorldChunk.CHUNK_SIZE);
-
                 TargetChunk target = new TargetChunk();
                 target.id = GetChunkId(x, z);
-
-                int hq_cutoff = HIGH_QUALITY_CHUNKS;
-                int mq_cutoff = HIGH_QUALITY_CHUNKS + MID_QUALITY_CHUNKS;
-
-                if (distance_x <= hq_cutoff && distance_z <= hq_cutoff)
-                {
-                    target.quality = WorldChunk.Lod.FullQuality;
-                }
-                else if (distance_x <= mq_cutoff && distance_z <= mq_cutoff)
-                {
-                    target.quality = WorldChunk.Lod.FullQuality;//WorldChunk.Lod.HalfQuality;
-                }
-                else
-                {
-                    target.quality = WorldChunk.Lod.FullQuality;//WorldChunk.Lod.QuarterQuality;
-                }
-
                 chunks.Add(target);
             }
         }
@@ -176,10 +176,11 @@ public class WorldStreaming
         return chunks;
     }
 
-    private JobHandle ScheduleChunkLoad(int chunk_id, WorldChunk.Lod quality, out NativeArray<float> heights)
+    private JobHandle ScheduleChunkLoad(int chunk_id, WorldChunk.Lod quality, out NativeArray<Vector3> verts, out NativeArray<int> tris, out NativeArray<Vector2> uvs, out NativeArray<Vector3> normals)
     {
         Vector2 position = GetChunkCoords(chunk_id);
-        return WorldChunk.ScheduleChunkGeneration((int)position.x, (int)position.y, quality, m_world_gen.GetPerlin(), out heights);
+        NativeArray<float> heights;
+        JobHandle chunk_gen_handle = WorldChunk.ScheduleChunkGeneration((int)position.x, (int)position.y, quality, m_world_gen.GetPerlin(), out heights);
+        return WorldChunk.ScheduleChunkMeshGeneration(heights, out verts, out tris, out uvs, out normals, chunk_gen_handle);
     }
-
 }

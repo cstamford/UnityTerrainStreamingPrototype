@@ -1,7 +1,8 @@
-using System;
+using Unity.Burst;
 using Unity.Collections;
 using Unity.Jobs;
 using UnityEngine;
+using UnityEngine.Assertions;
 
 public class WorldChunk
 {
@@ -12,18 +13,16 @@ public class WorldChunk
         QuarterQuality = 4
     }
 
-    public const int CHUNK_SIZE = 32;
+    public const int CHUNK_SIZE = 64;
     private const int CHUNK_SIZE_WITH_BORDER = CHUNK_SIZE + 1;
     private const int CHUNK_SIZE_WITH_NORMAL_BLENDING = CHUNK_SIZE_WITH_BORDER + 2;
 
+    [BurstCompile]
     private struct GenerateChunkJob : IJobParallelFor
     {
-        [ReadOnly]
         [DeallocateOnJobCompletion]
-        public NativeArray<Vector2> coords;
-
-        [ReadOnly]
-        public PerlinGenerator perlin;
+        [ReadOnly] public NativeArray<Vector2> coords;
+        [ReadOnly] public PerlinGenerator perlin;
 
         public NativeArray<float> heights;
 
@@ -39,7 +38,7 @@ public class WorldChunk
 
     public static JobHandle ScheduleChunkGeneration(int chunk_x, int chunk_z, Lod lod, PerlinGenerator perlin, out NativeArray<float> heights)
     {
-        NativeArray<Vector2> coords = new NativeArray<Vector2>(CHUNK_SIZE_WITH_NORMAL_BLENDING * CHUNK_SIZE_WITH_NORMAL_BLENDING, Allocator.TempJob);
+        NativeArray<Vector2> coords = new NativeArray<Vector2>(CHUNK_SIZE_WITH_NORMAL_BLENDING * CHUNK_SIZE_WITH_NORMAL_BLENDING, Allocator.Persistent);
 
         int i = 0;
         for (int z = chunk_z; z < chunk_z + CHUNK_SIZE_WITH_NORMAL_BLENDING; ++z)
@@ -50,10 +49,10 @@ public class WorldChunk
             }
         }
 
-        heights = new NativeArray<float>(coords.Length, Allocator.TempJob);
+        heights = new NativeArray<float>(coords.Length, Allocator.Persistent);
 
         GenerateChunkJob job = new GenerateChunkJob()
-        { 
+        {
             coords = coords,
             perlin = perlin,
             heights = heights
@@ -62,113 +61,157 @@ public class WorldChunk
         return job.Schedule(coords.Length, 32);
     }
 
-    // TODO: Maybe need to jobify?
-    public static Mesh GenerateChunkMesh(NativeArray<float> heights)
-    {   
-        Vector3[] verts = new Vector3[heights.Length];
-        Vector2[] uvs = new Vector2[CHUNK_SIZE_WITH_BORDER * CHUNK_SIZE_WITH_BORDER];
-        Vector3[] normals = new Vector3[CHUNK_SIZE_WITH_BORDER * CHUNK_SIZE_WITH_BORDER];
-        int[] tris = new int[heights.Length * 2 * 3];
+    [BurstCompile]
+    private struct GenerateChunkMeshJob : IJob
+    {
+        [DeallocateOnJobCompletion]
+        [ReadOnly] public NativeArray<float> heights;
 
-        // -- Step 1:
-        // Generate mesh with:
-        //      verts: CHUNK_SIZE_WITH_BORDER x CHUNK_SIZE_WITH_BORDER
-        //      tris: CHUNK_SIZE * CHUNK_SIZE * 2
-        // This is our main terrain that will be visible in the game.
+        public NativeArray<Vector3> verts;
+        public NativeArray<Vector2> uvs;
+        public NativeArray<int> tris;
 
-        int vert_counter = 0;
-        for (int z = 0; z < CHUNK_SIZE_WITH_BORDER; ++z)
+        public void Execute()
         {
-            for (int x = 0; x < CHUNK_SIZE_WITH_BORDER; ++x)
+            // -- Step 1:
+            // Generate mesh with:
+            //      verts: CHUNK_SIZE_WITH_BORDER x CHUNK_SIZE_WITH_BORDER
+            //      tris: CHUNK_SIZE * CHUNK_SIZE * 2
+            // This is our main terrain that will be visible in the game.
+
+            int vert_counter = 0;
+            for (int z = 0; z < CHUNK_SIZE_WITH_BORDER; ++z)
             {
-                int height_idx = (x + 1) + (z + 1) * CHUNK_SIZE_WITH_NORMAL_BLENDING;
-                verts[vert_counter] = new Vector3(x, heights[height_idx], z);
-                uvs[vert_counter] = new Vector2(x, z);
-                ++vert_counter;
-            }
-        }
-
-        int tri_counter = 0;
-        for (int z = 0; z < CHUNK_SIZE; ++z)
-        {
-            for (int x = 0; x < CHUNK_SIZE; ++x)
-            {
-                int vert_idx = x + z * CHUNK_SIZE_WITH_BORDER;
-                int vert_idx_below = vert_idx + CHUNK_SIZE_WITH_BORDER;
-                MakeFace(vert_idx, vert_idx + 1, vert_idx_below + 1, vert_idx_below, tris, ref tri_counter);
-            }
-        }
-
-        // -- Step 2:
-        // Append to this mesh verts for the outside border + tris for them.
-        // You can think of this as "tape" around the mesh to assist in calculating normals.
-
-        DoCorners(verts, ref vert_counter, tris, ref tri_counter, heights,
-            DoTopRow(verts, ref vert_counter, tris, ref tri_counter, heights),
-            DoBottomRow(verts, ref vert_counter, tris, ref tri_counter, heights),
-            DoLeftColumn(verts, ref vert_counter, tris, ref tri_counter, heights),
-            DoRightColumn(verts, ref vert_counter, tris, ref tri_counter, heights));
-
-        // -- Step 3:
-        // Calculate normals to prevent seams between neighbouring chunks.
-
-        for (int i = 0; i < normals.Length; ++i)
-        {
-            for (int tri = 0; tri < tri_counter; tri += 3)
-            {
-                int t0 = tris[tri + 0];
-                int t1 = tris[tri + 1];
-                int t2 = tris[tri + 2];
-
-                if (t0 == i || t1 == i || t2 == i)
+                for (int x = 0; x < CHUNK_SIZE_WITH_BORDER; ++x)
                 {
-                    Vector3 t0v = verts[t0];
-                    Vector3 t1v = verts[t1];
-                    Vector3 t2v = verts[t2];
-
-                    Vector3 n = Vector3.Cross(t1v - t0v, t2v - t0v);
-
-                    const bool USE_WEIGHTED_NORMALS = true;
-
-                    if (USE_WEIGHTED_NORMALS)
-                    {
-                        // TODO: I'm not so sure about this code, but it seems to work decently...
-                        // See https://stackoverflow.com/questions/45477806/general-method-for-calculating-smooth-vertex-normals-with-100-smoothness
-
-                        float a1 = Vector3.Angle(t1v - t0v, t2v - t0v);
-                        float a2 = Vector3.Angle(t2v - t1v, t0v - t1v);
-                        float a3 = Vector3.Angle(t0v - t2v, t1v - t2v);
-
-                        normals[i] += n * a1;
-                        normals[i] += n * a2;
-                        normals[i] += n * a3;
-                    }
-                    else
-                    {
-                        normals[i] += n;
-                    }
+                    int height_idx = (x + 1) + (z + 1) * CHUNK_SIZE_WITH_NORMAL_BLENDING;
+                    verts[vert_counter] = new Vector3(x, heights[height_idx], z);
+                    uvs[vert_counter] = new Vector2(x, z);
+                    ++vert_counter;
                 }
             }
 
-            normals[i].Normalize();
+            int tri_counter = 0;
+            for (int z = 0; z < CHUNK_SIZE; ++z)
+            {
+                for (int x = 0; x < CHUNK_SIZE; ++x)
+                {
+                    int vert_idx = x + z * CHUNK_SIZE_WITH_BORDER;
+                    int vert_idx_below = vert_idx + CHUNK_SIZE_WITH_BORDER;
+                    MakeFace(vert_idx, vert_idx + 1, vert_idx_below + 1, vert_idx_below, tris, ref tri_counter);
+                }
+            }
+
+            // -- Step 2:
+            // Append to this mesh verts for the outside border + tris for them.
+            // You can think of this as "tape" around the mesh to assist in calculating normals.
+
+            DoCorners(verts, ref vert_counter, tris, ref tri_counter, heights,
+                DoTopRow(verts, ref vert_counter, tris, ref tri_counter, heights),
+                DoBottomRow(verts, ref vert_counter, tris, ref tri_counter, heights),
+                DoLeftColumn(verts, ref vert_counter, tris, ref tri_counter, heights),
+                DoRightColumn(verts, ref vert_counter, tris, ref tri_counter, heights));
+
+            Assert.IsTrue(vert_counter == verts.Length);
+            Assert.IsTrue(tri_counter == tris.Length);
         }
+    }
 
+    [BurstCompile]
+    private struct GenerateChunkNormalsJob : IJob
+    {
+        [ReadOnly] public NativeSlice<Vector3> verts;
+        [ReadOnly] public NativeArray<int> tris;
 
-        // -- Step 4:
+        public NativeArray<Vector3> normals;
+
+        public void Execute()
+        {
+            // -- Step 3:
+            // Calculate normals to prevent seams between neighbouring chunks.
+
+            for (int tri = 0; tri < tris.Length; tri += 3)
+            {
+                Vector3 t0v = verts[tris[tri + 0]];
+                Vector3 t1v = verts[tris[tri + 1]];
+                Vector3 t2v = verts[tris[tri + 2]];
+
+                Vector3 n = Vector3.Cross(t1v - t0v, t2v - t0v);
+
+                // TODO: I'm not so sure about this code, but it seems to work decently...
+                // See https://stackoverflow.com/questions/45477806/general-method-for-calculating-smooth-vertex-normals-with-100-smoothness
+
+                float a0 = Vector3.Angle(t1v - t0v, t2v - t0v);
+                float a1 = Vector3.Angle(t2v - t1v, t0v - t1v);
+                float a2 = Vector3.Angle(t0v - t2v, t1v - t2v);
+
+                Vector3 n0 = n * a0;
+                Vector3 n1 = n * a1;
+                Vector3 n2 = n * a2;
+
+                for (int i = 0; i < 3; ++i)
+                {
+                    int v = tris[tri + i];
+                    if (v < normals.Length) // exclude tape verts
+                    {
+                        normals[v] += n0;
+                        normals[v] += n1;
+                        normals[v] += n2;
+                    }
+
+                }
+            }
+
+            for (int i = 0; i < normals.Length; ++i)
+            {
+                normals[i].Normalize();
+            }
+        }
+    }
+
+    public static JobHandle ScheduleChunkMeshGeneration(NativeArray<float> heights,
+        out NativeArray<Vector3> verts, out NativeArray<int> tris,  out NativeArray<Vector2> uvs, out NativeArray<Vector3> normals,
+        JobHandle depends = default)
+    {
+        verts = new NativeArray<Vector3>(CHUNK_SIZE_WITH_NORMAL_BLENDING * CHUNK_SIZE_WITH_NORMAL_BLENDING, Allocator.Persistent);
+        uvs = new NativeArray<Vector2>(CHUNK_SIZE_WITH_BORDER * CHUNK_SIZE_WITH_BORDER, Allocator.Persistent);
+        tris = new NativeArray<int>((CHUNK_SIZE_WITH_NORMAL_BLENDING - 1) * (CHUNK_SIZE_WITH_NORMAL_BLENDING - 1) * 2 * 3, Allocator.Persistent);
+
+        GenerateChunkMeshJob generate_mesh_job = new GenerateChunkMeshJob()
+        {
+            heights = heights,
+            verts = verts,
+            uvs = uvs,
+            tris = tris
+        };
+
+        JobHandle generate_mesh_job_handle = generate_mesh_job.Schedule(depends);
+
+        normals = new NativeArray<Vector3>(CHUNK_SIZE_WITH_BORDER * CHUNK_SIZE_WITH_BORDER, Allocator.Persistent);
+
+        GenerateChunkNormalsJob generate_chunk_normals_job = new GenerateChunkNormalsJob()
+        {
+            verts = verts,
+            tris = tris,
+            normals = normals
+        };
+
+        JobHandle generate_chunk_normals_job_handle = generate_chunk_normals_job.Schedule(generate_mesh_job_handle);
+        return generate_chunk_normals_job_handle;
+    }
+
+    public static Mesh FinalizeChunkMesh(NativeArray<Vector3> verts, NativeArray<int> tris, NativeArray<Vector2> uvs, NativeArray<Vector3> normals)
+    {
         // Remove the outside tape, so we're left with the good mesh.
-
         Mesh mesh = new Mesh();
         mesh.SetVertices(verts, 0, CHUNK_SIZE_WITH_BORDER * CHUNK_SIZE_WITH_BORDER);
         mesh.SetUVs(0, uvs);
         mesh.SetNormals(normals);
-
-        Array.Resize(ref tris, CHUNK_SIZE * CHUNK_SIZE * 2 * 3);
-        mesh.SetTriangles(tris, 0);
-
+        mesh.SetTriangles(tris.Slice(0, CHUNK_SIZE * CHUNK_SIZE * 2 * 3).ToArray(), 0);
         return mesh;
     }
 
-    private static int DoTopRow(Vector3[] verts, ref int vert_counter, int[] tris, ref int tri_counter, NativeArray<float> heights)
+    private static int DoTopRow(NativeArray<Vector3> verts, ref int vert_counter, NativeArray<int> tris, ref int tri_counter, NativeArray<float> heights)
     {
         int top_row_vert_counter = vert_counter;
         int top_row_vert_counter_start = vert_counter;
@@ -188,7 +231,7 @@ public class WorldChunk
         return top_row_vert_counter_start;
     }
 
-    private static int DoBottomRow(Vector3[] verts, ref int vert_counter, int[] tris, ref int tri_counter, NativeArray<float> heights)
+    private static int DoBottomRow(NativeArray<Vector3> verts, ref int vert_counter, NativeArray<int> tris, ref int tri_counter, NativeArray<float> heights)
     {
         int bottom_row_vert_counter = vert_counter;
         int bottom_row_vert_counter_start = vert_counter;
@@ -209,7 +252,7 @@ public class WorldChunk
         return bottom_row_vert_counter_start;
     }
 
-    private static int DoLeftColumn(Vector3[] verts, ref int vert_counter, int[] tris, ref int tri_counter, NativeArray<float> heights)
+    private static int DoLeftColumn(NativeArray<Vector3> verts, ref int vert_counter, NativeArray<int> tris, ref int tri_counter, NativeArray<float> heights)
     {
         int left_column_vert_counter = vert_counter;
         int left_column_vert_counter_start = vert_counter;
@@ -231,7 +274,7 @@ public class WorldChunk
         return left_column_vert_counter_start;
     }
 
-    private static int DoRightColumn(Vector3[] verts, ref int vert_counter, int[] tris, ref int tri_counter, NativeArray<float> heights)
+    private static int DoRightColumn(NativeArray<Vector3> verts, ref int vert_counter, NativeArray<int> tris, ref int tri_counter, NativeArray<float> heights)
     {
         int right_column_vert_counter = vert_counter;
         int right_column_vert_counter_start = right_column_vert_counter;
@@ -253,7 +296,7 @@ public class WorldChunk
         return right_column_vert_counter_start;
     }
 
-    private static void DoCorners(Vector3[] verts, ref int vert_counter, int[] tris, ref int tri_counter, NativeArray<float> heights,
+    private static void DoCorners(NativeArray<Vector3> verts, ref int vert_counter, NativeArray<int> tris, ref int tri_counter, NativeArray<float> heights,
         int top_row, int bottom_row, int left_column, int right_column)
     {
         // Top left
@@ -277,7 +320,7 @@ public class WorldChunk
         MakeFace(left_column + (CHUNK_SIZE_WITH_BORDER - 1), (CHUNK_SIZE_WITH_BORDER - 1) * CHUNK_SIZE_WITH_BORDER, bottom_row, bottom_left, tris, ref tri_counter);
     }
 
-    private static void MakeFace(int v0, int v1, int v2, int v3, int[] tris, ref int tri_counter)
+    private static void MakeFace(int v0, int v1, int v2, int v3, NativeArray<int> tris, ref int tri_counter)
     {
         tris[tri_counter++] = v0;
         tris[tri_counter++] = v3;
