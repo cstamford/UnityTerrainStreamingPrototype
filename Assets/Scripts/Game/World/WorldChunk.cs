@@ -158,7 +158,6 @@ public class WorldChunk
                         normals[v] += n1;
                         normals[v] += n2;
                     }
-
                 }
             }
 
@@ -299,22 +298,18 @@ public class WorldChunk
     private static void DoCorners(NativeArray<Vector3> verts, ref int vert_counter, NativeArray<int> tris, ref int tri_counter, NativeArray<float> heights,
         int top_row, int bottom_row, int left_column, int right_column)
     {
-        // Top left
         int top_left = vert_counter++;
         verts[top_left] = new Vector3(-1, heights[0], -1);
         MakeFace(top_left, top_row, 0, left_column, tris, ref tri_counter);
 
-        // Top right
         int top_right = vert_counter++;
         verts[top_right] = new Vector3(CHUNK_SIZE_WITH_BORDER, heights[CHUNK_SIZE_WITH_NORMAL_BLENDING - 1], -1);
         MakeFace(top_row + (CHUNK_SIZE_WITH_BORDER - 1), top_right, right_column, CHUNK_SIZE_WITH_BORDER - 1, tris, ref tri_counter);
 
-        // Bottom right
         int bottom_right = vert_counter++;
         verts[bottom_right] = new Vector3(CHUNK_SIZE_WITH_BORDER, heights[heights.Length - 1], CHUNK_SIZE_WITH_BORDER);
         MakeFace(CHUNK_SIZE_WITH_BORDER * CHUNK_SIZE_WITH_BORDER - 1, right_column + (CHUNK_SIZE_WITH_BORDER - 1), bottom_right, bottom_row + (CHUNK_SIZE_WITH_BORDER - 1), tris, ref tri_counter);
 
-        // Bottom left
         int bottom_left = vert_counter++;
         verts[bottom_left] = new Vector3(-1, heights[heights.Length - CHUNK_SIZE_WITH_NORMAL_BLENDING], CHUNK_SIZE_WITH_BORDER);
         MakeFace(left_column + (CHUNK_SIZE_WITH_BORDER - 1), (CHUNK_SIZE_WITH_BORDER - 1) * CHUNK_SIZE_WITH_BORDER, bottom_row, bottom_left, tris, ref tri_counter);

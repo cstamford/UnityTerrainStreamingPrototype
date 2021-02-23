@@ -14,8 +14,9 @@ public class WorldStreaming
     {
         public TargetChunk chunk;
         public GameObject obj;
+        public bool unload = false;
 
-        public bool load_finalized;
+        public bool load_finalized = false;
         public JobHandle load_job;
         public NativeArray<Vector3> load_verts;
         public NativeArray<int> load_tris;
@@ -27,7 +28,7 @@ public class WorldStreaming
 
     private int m_chunk_id_last = -1;
 
-    private const float QUANTUM = 2.0f;
+    private const float QUANTUM = 2.0f / 1000.0f;
 
     private WorldGen m_world_gen;
 
@@ -42,6 +43,8 @@ public class WorldStreaming
         if (chunk_id != m_chunk_id_last)
         {
             List<TargetChunk> chunks = GetTargetChunks(chunk_id);
+
+            // -- Load any chunks that need loading
 
             foreach (TargetChunk chunk in chunks)
             {
@@ -62,7 +65,6 @@ public class WorldStreaming
 
                 if (need_load)
                 {
-                    loaded_chunk.load_finalized = false;
                     loaded_chunk.load_job = ScheduleChunkLoad(
                         chunk.id,
                         WorldChunk.Lod.FullQuality,
@@ -73,16 +75,54 @@ public class WorldStreaming
                 }
             }
 
-            // TODO: Unload any chunks that are not in the target chunk collection
+            // -- Find any chunks that we want to unload, and unload them.
+
+            foreach (KeyValuePair<int, LoadedChunk> chunk in m_loaded_chunks)
+            {
+                bool needs_unload = true;
+
+                for (int i = 0; i < chunks.Count; ++i)
+                {
+                    if (chunks[i].id == chunk.Key)
+                    {
+                        needs_unload = false;
+                        break;
+                    }
+                }
+
+                if (needs_unload)
+                {
+                    chunk.Value.unload = true;
+                }
+            }
 
             m_chunk_id_last = chunk_id;
         }
 
         float time_start = Time.realtimeSinceStartup;
 
+        List<int> unloaded_chunks = new List<int>();
+
         foreach (KeyValuePair<int, LoadedChunk> chunk in m_loaded_chunks)
         {
-            if (!chunk.Value.load_finalized && chunk.Value.load_job.IsCompleted)
+            if (chunk.Value.unload)
+            {
+                if (chunk.Value.load_finalized) // finalized, we only need to free the object
+                {
+                    Object.Destroy(chunk.Value.obj);
+                    unloaded_chunks.Add(chunk.Key);
+                }
+                else if (chunk.Value.load_job.IsCompleted) // not finalized, but tasks done - we can release resources
+                {
+                    chunk.Value.load_job.Complete();
+                    chunk.Value.load_verts.Dispose();
+                    chunk.Value.load_tris.Dispose();
+                    chunk.Value.load_uvs.Dispose();
+                    chunk.Value.load_normals.Dispose();
+                    unloaded_chunks.Add(chunk.Key);
+                }
+            }
+            else if (!chunk.Value.load_finalized && chunk.Value.load_job.IsCompleted)
             {
                 chunk.Value.load_job.Complete();
                 chunk.Value.load_finalized = true;
@@ -113,10 +153,15 @@ public class WorldStreaming
 
             float time_now = Time.realtimeSinceStartup;
             float time_delta = time_now - time_start;
-            if (time_delta > QUANTUM / 1000.0f)
+            if (time_delta > QUANTUM)
             {
                 break;
             }
+        }
+
+        foreach (int chunk in unloaded_chunks)
+        {
+            m_loaded_chunks.Remove(chunk);
         }
     }
 
