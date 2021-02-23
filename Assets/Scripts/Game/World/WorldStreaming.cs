@@ -1,167 +1,89 @@
 ﻿using System.Collections.Generic;
 using Unity.Collections;
 using Unity.Jobs;
+using Unity.Profiling;
 using UnityEngine;
+using UnityEngine.Assertions;
 
 public class WorldStreaming
 {
-    private class TargetChunk
+    private static readonly float[] CHUNK_LOD_DIST =
     {
-        public int id;
+        WorldChunk.CHUNK_SIZE * 2,
+        WorldChunk.CHUNK_SIZE * 4,
+        WorldChunk.CHUNK_SIZE * 6
+    };
+
+    private const int LOD_UPDATE_SLICES = 5;
+
+    private class LoadedChunkMeshParams
+    {
+        public NativeArray<Vector3> verts;
+        public NativeArray<int> tris;
+        public NativeArray<Vector2> uvs;
+        public NativeArray<Vector3> normals;
     }
 
     private class LoadedChunk
     {
-        public TargetChunk chunk;
-        public GameObject obj;
+        public int id;
         public bool unload = false;
 
+        public GameObject obj;
+        public GameObject[] lods;
+        public int lod_frame_idx;
+        public LoadedChunkMeshParams[] mesh_params;
+
+        public bool load_started = false;
         public bool load_finalized = false;
         public JobHandle load_job;
-        public NativeArray<Vector3> load_verts;
-        public NativeArray<int> load_tris;
-        public NativeArray<Vector2> load_uvs;
-        public NativeArray<Vector3> load_normals;
     }
 
     private Dictionary<int, LoadedChunk> m_loaded_chunks = new Dictionary<int, LoadedChunk>();
 
     private int m_chunk_id_last = -1;
 
-    private const float QUANTUM = 2.0f / 1000.0f;
-
+    private World m_world;
     private WorldGen m_world_gen;
 
-    public WorldStreaming(WorldGen world_gen)
+    private static ProfilerMarker s_zone_transition_marker = new ProfilerMarker("WorldStreaming.HandleZoneTransition");
+    private static ProfilerMarker s_zone_finalization_marker = new ProfilerMarker("WorldStreaming.HandleZoneFinalization");
+    private static ProfilerMarker s_lod_marker = new ProfilerMarker("WorldStreaming.SelectActiveLod");
+
+    public WorldStreaming(World world, WorldGen world_gen)
     {
+        m_world = world;
         m_world_gen = world_gen;
     }
 
     public void Update(Vector3 position)
     {
-        int chunk_id = GetChunkId(position.x, position.z);
-        if (chunk_id != m_chunk_id_last)
+        using (s_zone_transition_marker.Auto())
         {
-            List<TargetChunk> chunks = GetTargetChunks(chunk_id);
-
-            // -- Load any chunks that need loading
-
-            foreach (TargetChunk chunk in chunks)
+            int chunk_id = GetChunkId(position.x, position.z);
+            if (chunk_id != m_chunk_id_last)
             {
-                LoadedChunk loaded_chunk;
-
-                bool need_load = true;
-
-                if (m_loaded_chunks.TryGetValue(chunk.id, out loaded_chunk))
-                {
-                    need_load = false;
-                }
-                else
-                {
-                    loaded_chunk = new LoadedChunk();
-                    loaded_chunk.chunk = chunk;
-                    m_loaded_chunks.Add(chunk.id, loaded_chunk);
-                }
-
-                if (need_load)
-                {
-                    loaded_chunk.load_job = ScheduleChunkLoad(
-                        chunk.id,
-                        WorldChunk.Lod.FullQuality,
-                        out loaded_chunk.load_verts,
-                        out loaded_chunk.load_tris,
-                        out loaded_chunk.load_uvs,
-                        out loaded_chunk.load_normals);
-                }
+                HandleZoneTransition(position);
+                m_chunk_id_last = chunk_id;
             }
+        }
 
-            // -- Find any chunks that we want to unload, and unload them.
+        using (s_zone_finalization_marker.Auto())
+        {
+            const float FINALIZATION_QUANTUM = 2.0f / 1000.0f;
+            HandleZoneFinalization(FINALIZATION_QUANTUM);
+        }
 
+        using (s_lod_marker.Auto())
+        {
             foreach (KeyValuePair<int, LoadedChunk> chunk in m_loaded_chunks)
             {
-                bool needs_unload = true;
-
-                for (int i = 0; i < chunks.Count; ++i)
+                if (chunk.Value.load_finalized &&
+                    Time.frameCount % LOD_UPDATE_SLICES == chunk.Value.lod_frame_idx)
                 {
-                    if (chunks[i].id == chunk.Key)
-                    {
-                        needs_unload = false;
-                        break;
-                    }
-                }
-
-                if (needs_unload)
-                {
-                    chunk.Value.unload = true;
+                    SelectActiveLod(position, chunk.Value);
                 }
             }
-
-            m_chunk_id_last = chunk_id;
-        }
-
-        float time_start = Time.realtimeSinceStartup;
-
-        List<int> unloaded_chunks = new List<int>();
-
-        foreach (KeyValuePair<int, LoadedChunk> chunk in m_loaded_chunks)
-        {
-            if (chunk.Value.unload)
-            {
-                if (chunk.Value.load_finalized) // finalized, we only need to free the object
-                {
-                    Object.Destroy(chunk.Value.obj);
-                    unloaded_chunks.Add(chunk.Key);
-                }
-                else if (chunk.Value.load_job.IsCompleted) // not finalized, but tasks done - we can release resources
-                {
-                    chunk.Value.load_job.Complete();
-                    chunk.Value.load_verts.Dispose();
-                    chunk.Value.load_tris.Dispose();
-                    chunk.Value.load_uvs.Dispose();
-                    chunk.Value.load_normals.Dispose();
-                    unloaded_chunks.Add(chunk.Key);
-                }
-            }
-            else if (!chunk.Value.load_finalized && chunk.Value.load_job.IsCompleted)
-            {
-                chunk.Value.load_job.Complete();
-                chunk.Value.load_finalized = true;
-
-                GameObject obj = new GameObject(string.Format("WorldChunk_{0}", chunk.Key));
-
-                Vector2 chunk_pos = GetChunkCoords(chunk.Value.chunk.id);
-                obj.transform.position = new Vector3(chunk_pos.x, 0.0f, chunk_pos.y);
-
-                MeshRenderer meshRenderer = obj.AddComponent<MeshRenderer>();
-                meshRenderer.sharedMaterial = Resources.Load<Material>("GrassMaterial");
-                meshRenderer.sharedMaterial.SetTextureScale("_BaseMap", new Vector2(WorldChunk.CHUNK_SIZE / 64.0f, WorldChunk.CHUNK_SIZE / 64.0f));
-
-                MeshFilter meshFilter = obj.AddComponent<MeshFilter>();
-                meshFilter.mesh = WorldChunk.FinalizeChunkMesh(
-                    chunk.Value.load_verts,
-                    chunk.Value.load_tris,
-                    chunk.Value.load_uvs,
-                    chunk.Value.load_normals);
-
-                chunk.Value.load_verts.Dispose();
-                chunk.Value.load_tris.Dispose();
-                chunk.Value.load_uvs.Dispose();
-                chunk.Value.load_normals.Dispose();
-
-                chunk.Value.obj = obj;
-            }
-
-            float time_now = Time.realtimeSinceStartup;
-            float time_delta = time_now - time_start;
-            if (time_delta > QUANTUM)
-            {
-                break;
-            }
-        }
-
-        foreach (int chunk in unloaded_chunks)
-        {
-            m_loaded_chunks.Remove(chunk);
         }
     }
 
@@ -175,7 +97,7 @@ public class WorldStreaming
         int x_grid = (int)x / WorldChunk.CHUNK_SIZE;
         int z_grid = (int)z / WorldChunk.CHUNK_SIZE;
 
-        return (int)(x_grid + z_grid * CHUNKS_PER_ROW);
+        return x_grid + z_grid * CHUNKS_PER_ROW;
     }
 
     public static Vector2 GetChunkCoords(int chunk_id)
@@ -189,43 +111,209 @@ public class WorldStreaming
         return new Vector2(x, z);
     }
 
-    private List<TargetChunk> GetTargetChunks(int chunk_id)
+    private List<int> GetTargetChunks(Vector3 position)
     {
-        const int HIGH_QUALITY_CHUNKS = 2;
-        const int MID_QUALITY_CHUNKS = 2;
-        const int LOW_QUALITY_CHUNKS = 2;
-        const int CHUNK_RADIUS = HIGH_QUALITY_CHUNKS + MID_QUALITY_CHUNKS + LOW_QUALITY_CHUNKS;
+        float furthest_radius = CHUNK_LOD_DIST[CHUNK_LOD_DIST.Length - 1];
 
-        List<TargetChunk> chunks = new List<TargetChunk>();
+        Vector2 top_left = new Vector2(position.x - furthest_radius - WorldChunk.CHUNK_SIZE, position.z - furthest_radius - WorldChunk.CHUNK_SIZE);
+        Vector2 bottom_right = new Vector2(position.x + furthest_radius + WorldChunk.CHUNK_SIZE, position.z + furthest_radius + WorldChunk.CHUNK_SIZE);
 
-        Vector2 position = GetChunkCoords(chunk_id);
+        // align to chunk boundaries
+        top_left.x = WorldChunk.CHUNK_SIZE * (int)(top_left.x / WorldChunk.CHUNK_SIZE);
+        top_left.y = WorldChunk.CHUNK_SIZE * (int)(top_left.y / WorldChunk.CHUNK_SIZE);
 
-        Vector2 top_left = new Vector2(
-            position.x - CHUNK_RADIUS * WorldChunk.CHUNK_SIZE, 
-            position.y - CHUNK_RADIUS * WorldChunk.CHUNK_SIZE);
+        bottom_right.x = WorldChunk.CHUNK_SIZE * (int)(bottom_right.x / WorldChunk.CHUNK_SIZE);
+        bottom_right.y = WorldChunk.CHUNK_SIZE * (int)(bottom_right.y / WorldChunk.CHUNK_SIZE);
 
-        Vector2 bottom_right = new Vector2(
-            position.x + CHUNK_RADIUS * WorldChunk.CHUNK_SIZE,
-            position.y + CHUNK_RADIUS * WorldChunk.CHUNK_SIZE);
+        Assert.IsTrue(top_left.x % WorldChunk.CHUNK_SIZE == 0.0f);
+        Assert.IsTrue(top_left.y % WorldChunk.CHUNK_SIZE == 0.0f);
+        Assert.IsTrue(bottom_right.x % WorldChunk.CHUNK_SIZE == 0.0f);
+        Assert.IsTrue(bottom_right.x % WorldChunk.CHUNK_SIZE == 0.0f);
+
+        List<int> chunks = new List<int>();
 
         for (float z = top_left.y; z < bottom_right.y; z += WorldChunk.CHUNK_SIZE)
         {
             for (float x = top_left.x; x < bottom_right.x; x += WorldChunk.CHUNK_SIZE)
             {
-                TargetChunk target = new TargetChunk();
-                target.id = GetChunkId(x, z);
-                chunks.Add(target);
+                chunks.Add(GetChunkId(x, z));
             }
         }
 
         return chunks;
     }
 
-    private JobHandle ScheduleChunkLoad(int chunk_id, WorldChunk.Lod quality, out NativeArray<Vector3> verts, out NativeArray<int> tris, out NativeArray<Vector2> uvs, out NativeArray<Vector3> normals)
+    private JobHandle ScheduleChunkLoad(int chunk_id, out LoadedChunkMeshParams[] mesh_params)
     {
         Vector2 position = GetChunkCoords(chunk_id);
-        NativeArray<float> heights;
-        JobHandle chunk_gen_handle = WorldChunk.ScheduleChunkGeneration((int)position.x, (int)position.y, quality, m_world_gen.GetPerlin(), out heights);
-        return WorldChunk.ScheduleChunkMeshGeneration(heights, out verts, out tris, out uvs, out normals, chunk_gen_handle);
+
+        const int LOD_COUNT = (int)WorldChunk.Lod.EnumCount;
+        mesh_params = new LoadedChunkMeshParams[LOD_COUNT];
+
+        NativeArray<JobHandle> handles = new NativeArray<JobHandle>(LOD_COUNT, Allocator.TempJob);
+
+        for (int i = 0; i < LOD_COUNT; ++i)
+        {
+            NativeArray<float> heights;
+            JobHandle chunk_gen_handle = WorldChunk.ScheduleChunkGeneration((int)position.x, (int)position.y, (WorldChunk.Lod)i, m_world_gen.GetPerlin(), out heights);
+
+            LoadedChunkMeshParams param = new LoadedChunkMeshParams();
+            handles[i] = WorldChunk.ScheduleChunkMeshGeneration(heights, out param.verts, out param.tris, out param.uvs, out param.normals, chunk_gen_handle);
+            mesh_params[i] = param;
+        }
+
+        JobHandle deps = JobHandle.CombineDependencies(handles);
+        handles.Dispose();
+        return deps;
+    }
+
+    private void FreeMeshParams(LoadedChunkMeshParams[] mesh_params)
+    {
+        foreach (LoadedChunkMeshParams param in mesh_params)
+        {
+            param.verts.Dispose();
+            param.tris.Dispose();
+            param.uvs.Dispose();
+            param.normals.Dispose();
+        }
+    }
+
+    private void SelectActiveLod(Vector3 pos, LoadedChunk chunk)
+    {
+        float dist_squared = (new Vector2(pos.x, pos.z) - GetChunkCoords(chunk.id)).sqrMagnitude;
+
+        int selected_lod_idx = -1;
+
+        for (int i = 0; i < CHUNK_LOD_DIST.Length; ++i)
+        {
+            float lod_switch_squared = CHUNK_LOD_DIST[i] * CHUNK_LOD_DIST[i];
+
+            if (dist_squared < lod_switch_squared)
+            {
+                selected_lod_idx = i;
+                break;
+            }
+        }
+
+        chunk.obj.SetActive(selected_lod_idx != -1);
+
+        for (int i = 0; i < chunk.lods.Length; ++i)
+        {
+            chunk.lods[i].SetActive(i == selected_lod_idx);
+        }
+    }
+
+    private void HandleZoneTransition(Vector3 position)
+    {
+        List<int> chunks = GetTargetChunks(position);
+
+        foreach (int chunk in chunks)
+        {
+            if (!m_loaded_chunks.ContainsKey(chunk))
+            {
+                m_loaded_chunks.Add(chunk, new LoadedChunk { id = chunk });
+            }
+        }
+
+        foreach (KeyValuePair<int, LoadedChunk> chunk in m_loaded_chunks)
+        {
+            bool needs_unload = true;
+
+            for (int i = 0; i < chunks.Count; ++i)
+            {
+                if (chunks[i] == chunk.Key)
+                {
+                    needs_unload = false;
+                    break;
+                }
+            }
+
+            if (needs_unload)
+            {
+                chunk.Value.unload = true;
+            }
+        }
+    }
+
+    private void HandleZoneFinalization(float timeslice)
+    {
+        float time_start = Time.realtimeSinceStartup;
+
+        List<int> unloaded_chunks = new List<int>();
+
+        foreach (KeyValuePair<int, LoadedChunk> chunk in m_loaded_chunks)
+        {
+            if (!chunk.Value.load_started)
+            {
+                chunk.Value.load_started = true;
+                chunk.Value.load_job = ScheduleChunkLoad(chunk.Key, out chunk.Value.mesh_params);
+            }
+            else if (chunk.Value.unload)
+            {
+                if (chunk.Value.load_finalized) // finalized, we only need to free the objects
+                {
+                    Object.Destroy(chunk.Value.obj);
+                    foreach (Object obj in chunk.Value.lods)
+                    {
+                        Object.Destroy(obj);
+                    }
+                    unloaded_chunks.Add(chunk.Key);
+                }
+                else if (chunk.Value.load_job.IsCompleted) // not finalized, but tasks done - we can release resources
+                {
+                    chunk.Value.load_job.Complete();
+                    FreeMeshParams(chunk.Value.mesh_params);
+                    unloaded_chunks.Add(chunk.Key);
+                }
+            }
+            else if (!chunk.Value.load_finalized && chunk.Value.load_job.IsCompleted)
+            {
+                chunk.Value.load_job.Complete();
+                chunk.Value.load_finalized = true;
+
+                Vector2 chunk_pos = GetChunkCoords(chunk.Key);
+
+                GameObject obj = new GameObject(string.Format("Chunk{0}", chunk.Key));
+                obj.transform.parent = m_world.gameObject.transform;
+                obj.transform.position = new Vector3(chunk_pos.x, 0.0f, chunk_pos.y);
+                chunk.Value.obj = obj;
+
+                const int LOD_COUNT = (int)WorldChunk.Lod.EnumCount;
+                chunk.Value.lods = new GameObject[LOD_COUNT];
+
+                for (int i = 0; i < LOD_COUNT; ++i)
+                {
+                    GameObject lod_obj = new GameObject(string.Format("Lod{1}", chunk.Key, i));
+                    lod_obj.transform.parent = obj.transform;
+                    lod_obj.transform.localPosition = new Vector3(0.0f, 0.0f, 0.0f);
+
+                    MeshRenderer meshRenderer = lod_obj.AddComponent<MeshRenderer>();
+                    meshRenderer.sharedMaterial = Resources.Load<Material>("GrassMaterial");
+                    meshRenderer.sharedMaterial.SetTextureScale("_BaseMap", new Vector2(WorldChunk.CHUNK_SIZE / 64.0f, WorldChunk.CHUNK_SIZE / 64.0f));
+
+                    Assert.IsTrue(chunk.Value.mesh_params.Length == LOD_COUNT);
+                    LoadedChunkMeshParams param = chunk.Value.mesh_params[i];
+
+                    MeshFilter meshFilter = lod_obj.AddComponent<MeshFilter>();
+                    meshFilter.mesh = WorldChunk.FinalizeChunkMesh(param.verts, param.tris, param.uvs, param.normals);
+
+                    chunk.Value.lods[i] = lod_obj;
+                }
+
+                chunk.Value.lod_frame_idx = Time.frameCount % LOD_UPDATE_SLICES;
+
+                FreeMeshParams(chunk.Value.mesh_params);
+            }
+
+            if (Time.realtimeSinceStartup - time_start > timeslice)
+            {
+                break;
+            }
+        }
+
+        foreach (int chunk in unloaded_chunks)
+        {
+            m_loaded_chunks.Remove(chunk);
+        }
     }
 }

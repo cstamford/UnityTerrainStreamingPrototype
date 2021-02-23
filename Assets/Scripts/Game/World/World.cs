@@ -9,7 +9,7 @@ public class World : MonoBehaviour
     public void Init(string seed, GameObject camera)
     {
         m_world_gen = new WorldGen(seed);
-        m_world_streaming = new WorldStreaming(m_world_gen);
+        m_world_streaming = new WorldStreaming(this, m_world_gen);
         m_camera = camera;
     }
 

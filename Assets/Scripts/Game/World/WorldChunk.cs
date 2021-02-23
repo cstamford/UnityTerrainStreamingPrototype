@@ -8,9 +8,10 @@ public class WorldChunk
 {
     public enum Lod
     {
-        FullQuality = 1,
-        HalfQuality = 2,
-        QuarterQuality = 4
+        FullQuality,
+        HalfQuality,
+        QuarterQuality,
+        EnumCount
     }
 
     public const int CHUNK_SIZE = 64;
@@ -38,7 +39,7 @@ public class WorldChunk
 
     public static JobHandle ScheduleChunkGeneration(int chunk_x, int chunk_z, Lod lod, PerlinGenerator perlin, out NativeArray<float> heights)
     {
-        NativeArray<Vector2> coords = new NativeArray<Vector2>(CHUNK_SIZE_WITH_NORMAL_BLENDING * CHUNK_SIZE_WITH_NORMAL_BLENDING, Allocator.Persistent);
+        NativeArray<Vector2> coords = new NativeArray<Vector2>(CHUNK_SIZE_WITH_NORMAL_BLENDING * CHUNK_SIZE_WITH_NORMAL_BLENDING, Allocator.TempJob);
 
         int i = 0;
         for (int z = chunk_z; z < chunk_z + CHUNK_SIZE_WITH_NORMAL_BLENDING; ++z)
