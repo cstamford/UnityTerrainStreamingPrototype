@@ -6,17 +6,9 @@ using UnityEngine.Assertions;
 
 public class WorldChunk
 {
-    public enum Lod
-    {
-        FullQuality,
-        HalfQuality,
-        QuarterQuality,
-        EnumCount
-    }
+    public const int SIZE = 64;
 
-    public const int CHUNK_SIZE = 64;
-    private const int CHUNK_SIZE_WITH_BORDER = CHUNK_SIZE + 1;
-    private const int CHUNK_SIZE_WITH_NORMAL_BLENDING = CHUNK_SIZE_WITH_BORDER + 2;
+    private const int SIZE_WITH_BORDER = SIZE + 1;
 
     [BurstCompile]
     private struct GenerateChunkJob : IJobParallelFor
@@ -30,23 +22,24 @@ public class WorldChunk
         public void Execute(int id)
         {
             heights[id] =
-                perlin.GetHeightAt(coords[id].x / 16.0f, coords[id].y / 16.0f) +
-                Mathf.Max(
-                    perlin.GetHeightAt((coords[id].x + 250.0f) / 4.0f, (coords[id].y + 250.0f) / 4.0f),
-                    perlin.GetHeightAt((coords[id].x - 100.0f) / 4.0f, (coords[id].y - 100.0f) / 4.0f));
+                perlin.GetHeightAt(coords[id].x / 64.0f, coords[id].y / 128.0f) * 32.0f +
+                Mathf.Min(
+                    perlin.GetHeightAt((coords[id].x + 0.05f) / 16.0f, (coords[id].y + 0.05f) / 32.0f),
+                    perlin.GetHeightAt((coords[id].x - 0.05f) / 32.0f, (coords[id].y - 0.05f) / 16.0f));
         }
     }
 
-    public static JobHandle ScheduleChunkGeneration(int chunk_x, int chunk_z, Lod lod, PerlinGenerator perlin, out NativeArray<float> heights)
+    public static JobHandle ScheduleChunkGeneration(int chunk_x, int chunk_z, PerlinGenerator perlin, out NativeArray<float> heights)
     {
-        NativeArray<Vector2> coords = new NativeArray<Vector2>(CHUNK_SIZE_WITH_NORMAL_BLENDING * CHUNK_SIZE_WITH_NORMAL_BLENDING, Allocator.TempJob);
+        int heights_count = SIZE_WITH_BORDER * SIZE_WITH_BORDER; // always calc full precision heights even if they aren't used
+        NativeArray<Vector2> coords = new NativeArray<Vector2>(heights_count, Allocator.TempJob);
 
         int i = 0;
-        for (int z = chunk_z; z < chunk_z + CHUNK_SIZE_WITH_NORMAL_BLENDING; ++z)
+        for (int z = chunk_z; z < chunk_z + SIZE_WITH_BORDER; ++z)
         {
-            for (int x = chunk_x; x < chunk_x + CHUNK_SIZE_WITH_NORMAL_BLENDING; ++x)
+            for (int x = chunk_x; x < chunk_x + SIZE_WITH_BORDER; ++x)
             {
-                coords[i++] = new Vector2(x - 1, z - 1);
+                coords[i++] = new Vector2(x, z);
             }
         }
 
@@ -65,8 +58,8 @@ public class WorldChunk
     [BurstCompile]
     private struct GenerateChunkMeshJob : IJob
     {
-        [DeallocateOnJobCompletion]
         [ReadOnly] public NativeArray<float> heights;
+        [ReadOnly] public int distance_per_vert;
 
         public NativeArray<Vector3> verts;
         public NativeArray<Vector2> uvs;
@@ -75,43 +68,34 @@ public class WorldChunk
         public void Execute()
         {
             // -- Step 1:
-            // Generate mesh with:
-            //      verts: CHUNK_SIZE_WITH_BORDER x CHUNK_SIZE_WITH_BORDER
-            //      tris: CHUNK_SIZE * CHUNK_SIZE * 2
+            // Generate mesh with subdivision.
             // This is our main terrain that will be visible in the game.
 
             int vert_counter = 0;
-            for (int z = 0; z < CHUNK_SIZE_WITH_BORDER; ++z)
+            for (int z = 0; z < SIZE_WITH_BORDER; z += distance_per_vert)
             {
-                for (int x = 0; x < CHUNK_SIZE_WITH_BORDER; ++x)
+                for (int x = 0; x < SIZE_WITH_BORDER; x += distance_per_vert)
                 {
-                    int height_idx = (x + 1) + (z + 1) * CHUNK_SIZE_WITH_NORMAL_BLENDING;
+                    int height_idx = x + z * SIZE_WITH_BORDER;
                     verts[vert_counter] = new Vector3(x, heights[height_idx], z);
-                    uvs[vert_counter] = new Vector2(x, z);
+                    uvs[vert_counter] = new Vector2((float)x / SIZE_WITH_BORDER, (float)z / SIZE_WITH_BORDER);
                     ++vert_counter;
                 }
             }
 
+            int stride = SIZE / distance_per_vert;
+
             int tri_counter = 0;
-            for (int z = 0; z < CHUNK_SIZE; ++z)
+            for (int z = 0; z < stride; ++z)
             {
-                for (int x = 0; x < CHUNK_SIZE; ++x)
+                for (int x = 0; x < stride; ++x)
                 {
-                    int vert_idx = x + z * CHUNK_SIZE_WITH_BORDER;
-                    int vert_idx_below = vert_idx + CHUNK_SIZE_WITH_BORDER;
+                    int vert_stride = stride + 1;
+                    int vert_idx = x + z * vert_stride;
+                    int vert_idx_below = vert_idx + vert_stride;
                     MakeFace(vert_idx, vert_idx + 1, vert_idx_below + 1, vert_idx_below, tris, ref tri_counter);
                 }
             }
-
-            // -- Step 2:
-            // Append to this mesh verts for the outside border + tris for them.
-            // You can think of this as "tape" around the mesh to assist in calculating normals.
-
-            DoCorners(verts, ref vert_counter, tris, ref tri_counter, heights,
-                DoTopRow(verts, ref vert_counter, tris, ref tri_counter, heights),
-                DoBottomRow(verts, ref vert_counter, tris, ref tri_counter, heights),
-                DoLeftColumn(verts, ref vert_counter, tris, ref tri_counter, heights),
-                DoRightColumn(verts, ref vert_counter, tris, ref tri_counter, heights));
 
             Assert.IsTrue(vert_counter == verts.Length);
             Assert.IsTrue(tri_counter == tris.Length);
@@ -153,12 +137,9 @@ public class WorldChunk
                 for (int i = 0; i < 3; ++i)
                 {
                     int v = tris[tri + i];
-                    if (v < normals.Length) // exclude tape verts
-                    {
-                        normals[v] += n0;
-                        normals[v] += n1;
-                        normals[v] += n2;
-                    }
+                    normals[v] += n0;
+                    normals[v] += n1;
+                    normals[v] += n2;
                 }
             }
 
@@ -169,17 +150,20 @@ public class WorldChunk
         }
     }
 
-    public static JobHandle ScheduleChunkMeshGeneration(NativeArray<float> heights,
+    public static JobHandle ScheduleChunkMeshGeneration(NativeArray<float> heights, int distance_per_vert,
         out NativeArray<Vector3> verts, out NativeArray<int> tris,  out NativeArray<Vector2> uvs, out NativeArray<Vector3> normals,
         JobHandle depends = default)
     {
-        verts = new NativeArray<Vector3>(CHUNK_SIZE_WITH_NORMAL_BLENDING * CHUNK_SIZE_WITH_NORMAL_BLENDING, Allocator.Persistent);
-        uvs = new NativeArray<Vector2>(CHUNK_SIZE_WITH_BORDER * CHUNK_SIZE_WITH_BORDER, Allocator.Persistent);
-        tris = new NativeArray<int>((CHUNK_SIZE_WITH_NORMAL_BLENDING - 1) * (CHUNK_SIZE_WITH_NORMAL_BLENDING - 1) * 2 * 3, Allocator.Persistent);
+        ChunkMeshLayoutInfo info = CalculateChunkMeshLayoutInfo(distance_per_vert);
+
+        verts = new NativeArray<Vector3>(info.vert_count, Allocator.Persistent);
+        uvs = new NativeArray<Vector2>(info.vert_count, Allocator.Persistent);
+        tris = new NativeArray<int>(info.tri_count, Allocator.Persistent);
 
         GenerateChunkMeshJob generate_mesh_job = new GenerateChunkMeshJob()
         {
             heights = heights,
+            distance_per_vert = distance_per_vert,
             verts = verts,
             uvs = uvs,
             tris = tris
@@ -187,7 +171,7 @@ public class WorldChunk
 
         JobHandle generate_mesh_job_handle = generate_mesh_job.Schedule(depends);
 
-        normals = new NativeArray<Vector3>(CHUNK_SIZE_WITH_BORDER * CHUNK_SIZE_WITH_BORDER, Allocator.Persistent);
+        normals = new NativeArray<Vector3>(info.vert_count, Allocator.Persistent);
 
         GenerateChunkNormalsJob generate_chunk_normals_job = new GenerateChunkNormalsJob()
         {
@@ -202,118 +186,26 @@ public class WorldChunk
 
     public static Mesh FinalizeChunkMesh(NativeArray<Vector3> verts, NativeArray<int> tris, NativeArray<Vector2> uvs, NativeArray<Vector3> normals)
     {
-        // Remove the outside tape, so we're left with the good mesh.
         Mesh mesh = new Mesh();
-        mesh.SetVertices(verts, 0, CHUNK_SIZE_WITH_BORDER * CHUNK_SIZE_WITH_BORDER);
+        mesh.SetVertices(verts);
         mesh.SetUVs(0, uvs);
         mesh.SetNormals(normals);
-        mesh.SetTriangles(tris.Slice(0, CHUNK_SIZE * CHUNK_SIZE * 2 * 3).ToArray(), 0);
+        mesh.SetTriangles(tris.ToArray(), 0);
         return mesh;
     }
 
-    private static int DoTopRow(NativeArray<Vector3> verts, ref int vert_counter, NativeArray<int> tris, ref int tri_counter, NativeArray<float> heights)
+    private struct ChunkMeshLayoutInfo
     {
-        int top_row_vert_counter = vert_counter;
-        int top_row_vert_counter_start = vert_counter;
-
-        for (int x = 0; x < CHUNK_SIZE_WITH_BORDER; ++x)
-        {
-            int idx = x + 1;
-            verts[vert_counter++] = new Vector3(x, heights[idx], -1);
-        }
-
-        for (int x = 0; x < CHUNK_SIZE; ++x)
-        {
-            MakeFace(top_row_vert_counter, top_row_vert_counter + 1, x + 1, x, tris, ref tri_counter);
-            ++top_row_vert_counter;
-        }
-
-        return top_row_vert_counter_start;
+        public int vert_count;
+        public int tri_count;
     }
 
-    private static int DoBottomRow(NativeArray<Vector3> verts, ref int vert_counter, NativeArray<int> tris, ref int tri_counter, NativeArray<float> heights)
+    private static ChunkMeshLayoutInfo CalculateChunkMeshLayoutInfo(int distance_per_vert)
     {
-        int bottom_row_vert_counter = vert_counter;
-        int bottom_row_vert_counter_start = vert_counter;
-
-        for (int x = 0; x < CHUNK_SIZE_WITH_BORDER; ++x)
-        {
-            int idx = (x + 1) + (CHUNK_SIZE_WITH_NORMAL_BLENDING - 1) * CHUNK_SIZE_WITH_NORMAL_BLENDING;
-            verts[vert_counter++] = new Vector3(x, heights[idx], CHUNK_SIZE_WITH_BORDER);
-        }
-
-        for (int x = 0; x < CHUNK_SIZE; ++x)
-        {
-            int above_idx = x + CHUNK_SIZE * CHUNK_SIZE_WITH_BORDER;
-            MakeFace(above_idx, above_idx + 1, bottom_row_vert_counter + 1, bottom_row_vert_counter, tris, ref tri_counter);
-            ++bottom_row_vert_counter;
-        }
-
-        return bottom_row_vert_counter_start;
-    }
-
-    private static int DoLeftColumn(NativeArray<Vector3> verts, ref int vert_counter, NativeArray<int> tris, ref int tri_counter, NativeArray<float> heights)
-    {
-        int left_column_vert_counter = vert_counter;
-        int left_column_vert_counter_start = vert_counter;
-
-        for (int z = 0; z < CHUNK_SIZE_WITH_BORDER; ++z)
-        {
-            int idx = (z + 1) * CHUNK_SIZE_WITH_NORMAL_BLENDING;
-            verts[vert_counter++] = new Vector3(-1, heights[idx], z);
-        }
-
-        for (int z = 0; z < CHUNK_SIZE; ++z)
-        {
-            int right_idx = z * CHUNK_SIZE_WITH_BORDER;
-            int next_right_idx = (z + 1) * CHUNK_SIZE_WITH_BORDER;
-            MakeFace(left_column_vert_counter, right_idx, next_right_idx, left_column_vert_counter + 1, tris, ref tri_counter);
-            ++left_column_vert_counter;
-        }
-
-        return left_column_vert_counter_start;
-    }
-
-    private static int DoRightColumn(NativeArray<Vector3> verts, ref int vert_counter, NativeArray<int> tris, ref int tri_counter, NativeArray<float> heights)
-    {
-        int right_column_vert_counter = vert_counter;
-        int right_column_vert_counter_start = right_column_vert_counter;
-
-        for (int z = 0; z < CHUNK_SIZE_WITH_BORDER; ++z)
-        {
-            int idx = (CHUNK_SIZE_WITH_NORMAL_BLENDING - 1) + (z + 1) * CHUNK_SIZE_WITH_NORMAL_BLENDING;
-            verts[vert_counter++] = new Vector3(CHUNK_SIZE_WITH_BORDER, heights[idx], z);
-        }
-
-        for (int z = 0; z < CHUNK_SIZE; ++z)
-        {
-            int left_idx = (CHUNK_SIZE_WITH_BORDER - 1) + (z * CHUNK_SIZE_WITH_BORDER);
-            int next_left_idx = (CHUNK_SIZE_WITH_BORDER - 1) + ((z + 1) * CHUNK_SIZE_WITH_BORDER);
-            MakeFace(left_idx, right_column_vert_counter, right_column_vert_counter + 1, next_left_idx, tris, ref tri_counter);
-            ++right_column_vert_counter;
-        }
-
-        return right_column_vert_counter_start;
-    }
-
-    private static void DoCorners(NativeArray<Vector3> verts, ref int vert_counter, NativeArray<int> tris, ref int tri_counter, NativeArray<float> heights,
-        int top_row, int bottom_row, int left_column, int right_column)
-    {
-        int top_left = vert_counter++;
-        verts[top_left] = new Vector3(-1, heights[0], -1);
-        MakeFace(top_left, top_row, 0, left_column, tris, ref tri_counter);
-
-        int top_right = vert_counter++;
-        verts[top_right] = new Vector3(CHUNK_SIZE_WITH_BORDER, heights[CHUNK_SIZE_WITH_NORMAL_BLENDING - 1], -1);
-        MakeFace(top_row + (CHUNK_SIZE_WITH_BORDER - 1), top_right, right_column, CHUNK_SIZE_WITH_BORDER - 1, tris, ref tri_counter);
-
-        int bottom_right = vert_counter++;
-        verts[bottom_right] = new Vector3(CHUNK_SIZE_WITH_BORDER, heights[heights.Length - 1], CHUNK_SIZE_WITH_BORDER);
-        MakeFace(CHUNK_SIZE_WITH_BORDER * CHUNK_SIZE_WITH_BORDER - 1, right_column + (CHUNK_SIZE_WITH_BORDER - 1), bottom_right, bottom_row + (CHUNK_SIZE_WITH_BORDER - 1), tris, ref tri_counter);
-
-        int bottom_left = vert_counter++;
-        verts[bottom_left] = new Vector3(-1, heights[heights.Length - CHUNK_SIZE_WITH_NORMAL_BLENDING], CHUNK_SIZE_WITH_BORDER);
-        MakeFace(left_column + (CHUNK_SIZE_WITH_BORDER - 1), (CHUNK_SIZE_WITH_BORDER - 1) * CHUNK_SIZE_WITH_BORDER, bottom_row, bottom_left, tris, ref tri_counter);
+        int vert_count_one_row = Mathf.CeilToInt(SIZE_WITH_BORDER / (float)distance_per_vert);
+        int vert_count = vert_count_one_row * vert_count_one_row;
+        int tri_count = (vert_count_one_row - 1) * (vert_count_one_row - 1) * 6;
+        return new ChunkMeshLayoutInfo() { vert_count = vert_count, tri_count = tri_count };
     }
 
     private static void MakeFace(int v0, int v1, int v2, int v3, NativeArray<int> tris, ref int tri_counter)
