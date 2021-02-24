@@ -7,14 +7,30 @@ using UnityEngine.Assertions;
 
 public class WorldStreaming : MonoBehaviour
 {
-    private const int LOD_COUNT = 4;
+    private const int LOD_COUNT = 1;
 
-    private static readonly float[] CHUNK_LOD_DIST =
+    private static readonly float[] LOD_SWITCH_DISTANCE =
     {
         128.0f,
-        256.0f,
-        512.0f,
-        1024.0f
+        //256.0f,
+        //512.0f,
+        //1024.0f
+    };
+
+    private static readonly int[] LOD_DISTANCE_PER_VERT =
+    {
+        1,
+        //4,
+        //16,
+        //WorldChunk.SIZE / 2
+    };
+
+    private static readonly Color[] LOD_DEBUG_COLOR =
+    {
+        Color.red,
+        //new Color(1.0f, 0.7f, 0.0f),
+        //Color.yellow,
+        //Color.green
     };
 
     private const int LOD_UPDATE_SLICES = LOD_COUNT;
@@ -72,7 +88,9 @@ public class WorldStreaming : MonoBehaviour
         Assert.IsNotNull(m_tracking_object);
         Assert.IsNotNull(m_terrain_material);
 
-        Assert.IsTrue(CHUNK_LOD_DIST.Length == LOD_COUNT);
+        Assert.IsTrue(LOD_SWITCH_DISTANCE.Length == LOD_COUNT);
+        Assert.IsTrue(LOD_DISTANCE_PER_VERT.Length == LOD_COUNT);
+        Assert.IsTrue(LOD_DEBUG_COLOR.Length == LOD_COUNT);
     }
 
     public void Update()
@@ -103,38 +121,15 @@ public class WorldStreaming : MonoBehaviour
                 if (chunk.load_finalized && Time.frameCount % LOD_UPDATE_SLICES == chunk.lod_frame_idx)
                 {
                     int lod = SelectActiveLod(position, chunk);
-
                     if (lod != chunk.lod_active_idx)
                     {
+                        chunk.lod_active_idx = lod;
                         chunk.obj.SetActive(lod != -1);
 
                         for (int i = 0; i < chunk.lod_info.Length; ++i)
                         {
                             chunk.lod_info[i].obj.SetActive(i == lod);
                         }
-
-                        if (lod != -1)
-                        {
-                            WorldChunk.ApplyCorrectedNormals(GetChunkConnections(chunk.id));
-
-                            LodInfo lod_info = chunk.lod_info[lod];
-                            Mesh lod_mesh = lod_info.obj.GetComponent<MeshFilter>().mesh;
-
-                            if (lod_info.skirts == null)
-                            {
-                                GameObject skirt_obj = new GameObject("Skirt");
-                                skirt_obj.transform.parent = lod_info.obj.transform;
-                                skirt_obj.transform.localPosition = new Vector3(0.0f, 0.0f, 0.0f);
-                                AddChunkRendering(skirt_obj, lod, WorldChunk.CreateChunkSkirting(lod_mesh.vertices, lod_mesh.normals));
-                                lod_info.skirts = skirt_obj;
-                            }
-                            else
-                            {
-                                lod_info.skirts.GetComponent<MeshFilter>().mesh = WorldChunk.CreateChunkSkirting(lod_mesh.vertices, lod_mesh.normals);
-                            }
-                        }
-
-                        chunk.lod_active_idx = lod;
                     }
                 }
             }
@@ -167,7 +162,7 @@ public class WorldStreaming : MonoBehaviour
 
     private HashSet<int> GetTargetChunks(Vector3 position)
     {
-        float furthest_radius = CHUNK_LOD_DIST[CHUNK_LOD_DIST.Length - 1];
+        float furthest_radius = LOD_SWITCH_DISTANCE[LOD_SWITCH_DISTANCE.Length - 1];
 
         Vector2 top_left = new Vector2(position.x - furthest_radius - WorldChunk.SIZE, position.z - furthest_radius - WorldChunk.SIZE);
         Vector2 bottom_right = new Vector2(position.x + furthest_radius + WorldChunk.SIZE, position.z + furthest_radius + WorldChunk.SIZE);
@@ -205,21 +200,10 @@ public class WorldStreaming : MonoBehaviour
 
         for (int i = 0; i < LOD_COUNT; ++i)
         {
-            int distance_per_vert = int.MaxValue;
-
-            switch (i)
-            {
-                case 0: distance_per_vert = 1; break;
-                case 1: distance_per_vert = 4; break;
-                case 2: distance_per_vert = 16; break;
-                case 3: distance_per_vert = 32; break;
-                default: Assert.IsTrue(false); break;
-            }
-
-            LoadedChunkMeshParams param = new LoadedChunkMeshParams();
-            mesh_params[i] = param;
-
-            JobHandle mesh_handle = WorldChunk.ScheduleChunkMeshGeneration(heights, distance_per_vert, out param.verts, out param.tris, out param.uvs, out param.normals, chunk_gen_handle);
+            mesh_params[i] = new LoadedChunkMeshParams();
+            JobHandle mesh_handle = WorldChunk.ScheduleChunkMeshGeneration(heights, LOD_DISTANCE_PER_VERT[i],
+                out mesh_params[i].verts, out mesh_params[i].tris, out mesh_params[i].uvs, out mesh_params[i].normals,
+                chunk_gen_handle);
             chunk_gen_handle = JobHandle.CombineDependencies(chunk_gen_handle, mesh_handle);
         }
 
@@ -249,9 +233,9 @@ public class WorldStreaming : MonoBehaviour
 
         int selected_lod_idx = -1;
 
-        for (int i = 0; i < CHUNK_LOD_DIST.Length; ++i)
+        for (int i = 0; i < LOD_SWITCH_DISTANCE.Length; ++i)
         {
-            float lod_switch_squared = CHUNK_LOD_DIST[i] * CHUNK_LOD_DIST[i];
+            float lod_switch_squared = LOD_SWITCH_DISTANCE[i] * LOD_SWITCH_DISTANCE[i];
 
             if (dist_squared < lod_switch_squared)
             {
@@ -266,6 +250,12 @@ public class WorldStreaming : MonoBehaviour
     private void HandleZoneTransition(Vector3 position)
     {
         HashSet<int> chunks = GetTargetChunks(position);
+
+        int base_y = (0 / WorldChunk.SIZE) * WorldChunk.SIZE;
+
+        chunks.Clear();
+        chunks.Add(GetChunkId(0, base_y));
+        chunks.Add(GetChunkId(0, base_y + WorldChunk.SIZE));
 
         foreach (int chunk in chunks)
         {
@@ -291,18 +281,7 @@ public class WorldStreaming : MonoBehaviour
 
         if (m_draw_lod)
         {
-            Color color = Color.black;
-
-            switch (lod)
-            {
-                case 0: color = Color.red; break;
-                case 1: color = new Color(1.0f, 0.7f, 0.0f); break;
-                case 2: color = Color.yellow; break;
-                case 3: color = Color.green; break;
-                default: Assert.IsTrue(false); break;
-            }
-
-            meshRenderer.material.SetColor("_BaseColor", color);
+            meshRenderer.material.SetColor("_BaseColor", LOD_DEBUG_COLOR[lod]);
         }
 
         MeshFilter meshFilter = obj.AddComponent<MeshFilter>();
@@ -350,6 +329,7 @@ public class WorldStreaming : MonoBehaviour
                 GameObject obj = new GameObject(string.Format("Chunk{0}", chunk.Key));
                 obj.transform.parent = m_world.gameObject.transform;
                 obj.transform.position = new Vector3(chunk_pos.x, 0.0f, chunk_pos.y);
+                obj.SetActive(false);
                 chunk.Value.obj = obj;
 
                 chunk.Value.lod_info = new LodInfo[LOD_COUNT];
@@ -361,13 +341,24 @@ public class WorldStreaming : MonoBehaviour
 
                     GameObject lod_obj = new GameObject(string.Format("Lod{1}", chunk.Key, i));
                     lod_obj.transform.parent = obj.transform;
-                    lod_obj.transform.localPosition = new Vector3(0.0f, 0.0f, 0.0f);
+                    lod_obj.transform.localPosition = Vector3.zero;
                     Mesh lod_mesh = WorldChunk.FinalizeChunkMesh(param.verts, param.tris, param.uvs, param.normals);
                     AddChunkRendering(lod_obj, i, lod_mesh);
+
+                    GameObject skirt_obj = new GameObject("Skirt");
+                    skirt_obj.transform.parent = lod_obj.transform;
+                    skirt_obj.transform.localPosition = Vector3.zero;
+                    AddChunkRendering(skirt_obj, i, WorldChunk.CreateChunkSkirting(lod_mesh.vertices, lod_mesh.normals));
+
+                    if (Debug.isDebugBuild)
+                    {
+                        lod_obj.AddComponent<MeshNormalRenderer>();
+                    }
 
                     chunk.Value.lod_info[i] = new LodInfo();
                     chunk.Value.lod_info[i].border_normals = WorldChunk.ExtractBorderNormals(param.normals);
                     chunk.Value.lod_info[i].obj = lod_obj;
+                    chunk.Value.lod_info[i].skirts = skirt_obj;
                 }
 
                 chunk.Value.lod_frame_idx = Time.frameCount % LOD_UPDATE_SLICES;
@@ -385,10 +376,5 @@ public class WorldStreaming : MonoBehaviour
         {
             m_loaded_chunks.Remove(chunk);
         }
-    }
-
-    private List<WorldChunk.ChunkConnection> GetChunkConnections(int chunk_id)
-    {
-        return new List<WorldChunk.ChunkConnection>();
     }
 }
