@@ -6,60 +6,24 @@ using UnityEngine.Assertions;
 
 public class WorldChunk
 {
-    public const int SIZE = 64;
+    public const int SIZE = 128;
+    public const int SIZE_WITH_BORDER = SIZE + 1;
 
-    private const int SIZE_WITH_BORDER = SIZE + 1;
     private const int TRIM = 2;
-
-    [BurstCompile]
-    private struct GenerateChunkJob : IJobParallelFor
-    {
-        [DeallocateOnJobCompletion]
-        [ReadOnly] public NativeArray<Vector2> coords;
-        [ReadOnly] public PerlinGenerator perlin;
-
-        public NativeArray<float> heights;
-
-        public void Execute(int id)
-        {
-            heights[id] =
-                perlin.GetHeightAt(coords[id].x / 64.0f, coords[id].y / 128.0f) * 32.0f +
-                Mathf.Min(
-                    perlin.GetHeightAt((coords[id].x + 0.05f) / 16.0f, (coords[id].y + 0.05f) / 32.0f),
-                    perlin.GetHeightAt((coords[id].x - 0.05f) / 32.0f, (coords[id].y - 0.05f) / 16.0f));
-        }
-    }
-
-    public static JobHandle ScheduleChunkGeneration(int chunk_x, int chunk_z, PerlinGenerator perlin, out NativeArray<float> heights)
-    {
-        int heights_count = (SIZE_WITH_BORDER + TRIM) * (SIZE_WITH_BORDER + TRIM); // always calc full precision heights even if they aren't used
-        NativeArray<Vector2> coords = new NativeArray<Vector2>(heights_count, Allocator.TempJob);
-
-        int i = 0;
-        for (int z = chunk_z - 1; z < chunk_z + SIZE_WITH_BORDER + 1; ++z)
-        {
-            for (int x = chunk_x - 1; x < chunk_x + SIZE_WITH_BORDER + 1; ++x)
-            {
-                coords[i++] = new Vector2(x, z);
-            }
-        }
-
-        heights = new NativeArray<float>(coords.Length, Allocator.Persistent);
-
-        GenerateChunkJob job = new GenerateChunkJob()
-        {
-            coords = coords,
-            perlin = perlin,
-            heights = heights
-        };
-
-        return job.Schedule(coords.Length, 32);
-    }
 
     [BurstCompile]
     private struct GenerateChunkMeshJob : IJob
     {
-        [ReadOnly] public NativeArray<float> heights;
+        [ReadOnly] public NativeArray<float> heights_north;
+        [ReadOnly] public NativeArray<float> heights_northeast;
+        [ReadOnly] public NativeArray<float> heights_east;
+        [ReadOnly] public NativeArray<float> heights_southeast;
+        [ReadOnly] public NativeArray<float> heights_south;
+        [ReadOnly] public NativeArray<float> heights_southwest;
+        [ReadOnly] public NativeArray<float> heights_west;
+        [ReadOnly] public NativeArray<float> heights_northwest;
+        [ReadOnly] public NativeArray<float> heights_self;
+
         [ReadOnly] public int distance_per_vert;
 
         public NativeArray<Vector3> verts;
@@ -77,8 +41,8 @@ public class WorldChunk
             {
                 for (int x = 0; x < SIZE_WITH_BORDER; x += distance_per_vert)
                 {
-                    int height_idx = (x + 1) + (z + 1) * (SIZE_WITH_BORDER + TRIM);
-                    verts[vert_counter] = new Vector3(x, heights[height_idx], z);
+                    int height_idx = x + z * SIZE_WITH_BORDER;
+                    verts[vert_counter] = new Vector3(x, heights_self[height_idx], z);
                     uvs[vert_counter] = new Vector2((float)x / SIZE_WITH_BORDER, (float)z / SIZE_WITH_BORDER);
                     ++vert_counter;
                 }
@@ -97,6 +61,14 @@ public class WorldChunk
                     MakeFace(vert_idx, vert_idx + 1, vert_idx_below + 1, vert_idx_below, tris, ref tri_counter);
                 }
             }
+
+            /*
+            CreateCornersTape(verts, ref vert_counter, tris, ref tri_counter, heights, distance_per_vert,
+                CreateTopRowTape(verts, ref vert_counter, tris, ref tri_counter, heights, distance_per_vert),
+                CreateBottomRowTape(verts, ref vert_counter, tris, ref tri_counter, heights, distance_per_vert),
+                CreateLeftColumnTape(verts, ref vert_counter, tris, ref tri_counter, heights, distance_per_vert),
+                CreateRightColumnTape(verts, ref vert_counter, tris, ref tri_counter, heights, distance_per_vert));
+            */
         }
     }
 
@@ -148,7 +120,7 @@ public class WorldChunk
         }
     }
 
-    public static JobHandle ScheduleChunkMeshGeneration(NativeArray<float> heights, int distance_per_vert,
+    public static JobHandle ScheduleChunkMeshGeneration(NativeArray<float>[] heights, int distance_per_vert,
         out NativeArray<Vector3> verts, out NativeArray<int> tris, out NativeArray<Vector2> uvs, out NativeArray<Vector3> normals,
         out int final_vert_count, out int final_tri_count, JobHandle depends = default)
     {
@@ -160,7 +132,16 @@ public class WorldChunk
 
         GenerateChunkMeshJob generate_mesh_job = new GenerateChunkMeshJob()
         {
-            heights = heights,
+            heights_north       = heights[1],
+            heights_northeast   = heights[2],
+            heights_east        = heights[5],
+            heights_southeast   = heights[8],
+            heights_south       = heights[7],
+            heights_southwest   = heights[6],
+            heights_west        = heights[3],
+            heights_northwest   = heights[0],
+            heights_self        = heights[4],
+
             distance_per_vert = distance_per_vert,
             verts = verts,
             uvs = uvs,
@@ -191,10 +172,10 @@ public class WorldChunk
         int final_vert_count, int final_tri_count)
     {
         Mesh mesh = new Mesh();
-        mesh.SetVertices(verts, 0, final_vert_count);
-        mesh.SetUVs(0, uvs, 0, final_vert_count);
-        mesh.SetNormals(normals, 0, final_vert_count);
-        mesh.SetTriangles(tris.Slice(0, final_tri_count).ToArray(), 0);
+        mesh.SetVertices(verts);//, 0, final_vert_count);
+        mesh.SetUVs(0, uvs);//, 0, final_vert_count);
+        mesh.SetNormals(normals);//, 0, final_vert_count);
+        mesh.SetTriangles(tris.ToArray(), 0); //Slice(0, final_tri_count).ToArray(), 0);
         return mesh;
     }
 
@@ -322,11 +303,126 @@ public class WorldChunk
         Assert.IsTrue(tri_counter == tris.Length);
 
         Mesh mesh = new Mesh();
-        mesh.SetVertices(verts);
-        mesh.SetUVs(0, uvs);
-        mesh.SetNormals(normals);
-        mesh.SetTriangles(tris.ToArray(), 0);
+        //mesh.SetVertices(verts);
+        //mesh.SetUVs(0, uvs);
+        //mesh.SetNormals(normals);
+        //mesh.SetTriangles(tris.ToArray(), 0);
         return mesh;
+    }
+
+    private static int CreateTopRowTape(NativeArray<Vector3> verts, ref int vert_counter, NativeArray<int> tris, ref int tri_counter, NativeArray<float> heights, int distance_per_vert)
+    {
+        int top_row_vert_counter = vert_counter;
+        int top_row_vert_counter_start = vert_counter;
+
+        for (int x = 0; x < SIZE_WITH_BORDER; x += distance_per_vert)
+        {
+            int idx = x + 1;
+            verts[vert_counter++] = new Vector3(x, heights[idx], -1);
+        }
+
+        int stride = SIZE / distance_per_vert;
+
+        for (int x = 0; x < stride; ++x)
+        {
+            MakeFace(top_row_vert_counter, top_row_vert_counter + 1, x + 1, x, tris, ref tri_counter);
+            ++top_row_vert_counter;
+        }
+
+        return top_row_vert_counter_start;
+    }
+
+    private static int CreateBottomRowTape(NativeArray<Vector3> verts, ref int vert_counter, NativeArray<int> tris, ref int tri_counter, NativeArray<float> heights, int distance_per_vert)
+    {
+        int bottom_row_vert_counter = vert_counter;
+        int bottom_row_vert_counter_start = vert_counter;
+
+        for (int x = 0; x < SIZE_WITH_BORDER; x += distance_per_vert)
+        {
+            int idx = (x + 1) + (SIZE_WITH_BORDER + TRIM - 1) * (SIZE_WITH_BORDER + TRIM);
+            verts[vert_counter++] = new Vector3(x, heights[idx], SIZE_WITH_BORDER);
+        }
+
+        int stride = SIZE / distance_per_vert;
+
+        for (int x = 0; x < stride; ++x)
+        {
+            int above_idx = x + stride * (stride + 1);
+            MakeFace(above_idx, above_idx + 1, bottom_row_vert_counter + 1, bottom_row_vert_counter, tris, ref tri_counter);
+            ++bottom_row_vert_counter;
+        }
+
+        return bottom_row_vert_counter_start;
+    }
+
+    private static int CreateLeftColumnTape(NativeArray<Vector3> verts, ref int vert_counter, NativeArray<int> tris, ref int tri_counter, NativeArray<float> heights, int distance_per_vert)
+    {
+        int left_column_vert_counter = vert_counter;
+        int left_column_vert_counter_start = vert_counter;
+
+        int stride = SIZE / distance_per_vert;
+
+        for (int z = 0; z < SIZE_WITH_BORDER; z += distance_per_vert)
+        {
+            int idx = (z + 1) * (SIZE_WITH_BORDER + TRIM);
+            verts[vert_counter++] = new Vector3(-1, heights[idx], z);
+        }
+
+        for (int z = 0; z < stride; ++z)
+        {
+            int right_idx = z * (stride + 1);
+            int next_right_idx = right_idx + stride + 1;
+            MakeFace(left_column_vert_counter, right_idx, next_right_idx, left_column_vert_counter + 1, tris, ref tri_counter);
+            ++left_column_vert_counter;
+        }
+
+        return left_column_vert_counter_start;
+    }
+
+    private static int CreateRightColumnTape(NativeArray<Vector3> verts, ref int vert_counter, NativeArray<int> tris, ref int tri_counter, NativeArray<float> heights, int distance_per_vert)
+    {
+        int right_column_vert_counter = vert_counter;
+        int right_column_vert_counter_start = right_column_vert_counter;
+
+        for (int z = 0; z < SIZE_WITH_BORDER; z += distance_per_vert)
+        {
+            int idx = (SIZE_WITH_BORDER + TRIM - 1) + (z + 1) * (SIZE_WITH_BORDER + TRIM);
+            verts[vert_counter++] = new Vector3(SIZE_WITH_BORDER, heights[idx], z);
+        }
+
+        int stride = SIZE / distance_per_vert;
+
+        for (int z = 0; z < stride; ++z)
+        {
+            int left_idx = stride + z * (stride + 1);
+            int next_left_idx = left_idx + stride + 1;
+            MakeFace(left_idx, right_column_vert_counter, right_column_vert_counter + 1, next_left_idx, tris, ref tri_counter);
+            ++right_column_vert_counter;
+        }
+
+        return right_column_vert_counter_start;
+    }
+
+    private static void CreateCornersTape(NativeArray<Vector3> verts, ref int vert_counter, NativeArray<int> tris, ref int tri_counter, NativeArray<float> heights, int distance_per_vert,
+        int top_row, int bottom_row, int left_column, int right_column)
+    {
+        /*
+        int top_left = vert_counter++;
+        verts[top_left] = new Vector3(-1, heights[0], -1);
+        MakeFace(top_left, top_row, 0, left_column, tris, ref tri_counter);
+
+        int top_right = vert_counter++;
+        verts[top_right] = new Vector3(CHUNK_SIZE_WITH_BORDER, heights[CHUNK_SIZE_WITH_NORMAL_BLENDING - 1], -1);
+        MakeFace(top_row + (CHUNK_SIZE_WITH_BORDER - 1), top_right, right_column, CHUNK_SIZE_WITH_BORDER - 1, tris, ref tri_counter);
+
+        int bottom_right = vert_counter++;
+        verts[bottom_right] = new Vector3(CHUNK_SIZE_WITH_BORDER, heights[heights.Length - 1], CHUNK_SIZE_WITH_BORDER);
+        MakeFace(CHUNK_SIZE_WITH_BORDER * CHUNK_SIZE_WITH_BORDER - 1, right_column + (CHUNK_SIZE_WITH_BORDER - 1), bottom_right, bottom_row + (CHUNK_SIZE_WITH_BORDER - 1), tris, ref tri_counter);
+
+        int bottom_left = vert_counter++;
+        verts[bottom_left] = new Vector3(-1, heights[heights.Length - CHUNK_SIZE_WITH_NORMAL_BLENDING], CHUNK_SIZE_WITH_BORDER);
+        MakeFace(left_column + (CHUNK_SIZE_WITH_BORDER - 1), (CHUNK_SIZE_WITH_BORDER - 1) * CHUNK_SIZE_WITH_BORDER, bottom_row, bottom_left, tris, ref tri_counter);
+        */
     }
 
     private struct ChunkMeshLayoutInfo

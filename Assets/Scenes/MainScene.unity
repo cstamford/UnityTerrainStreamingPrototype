@@ -377,7 +377,7 @@ MonoBehaviour:
   m_world: {fileID: 1619169253}
   m_tracking_object: {fileID: 578242774}
   m_terrain_material: {fileID: 2100000, guid: 502923d2c28ba83459de23673072b863, type: 2}
-  m_draw_lod: 0
+  m_draw_lod: 1
 --- !u!1 &2138677391
 GameObject:
   m_ObjectHideFlags: 0

@@ -7,30 +7,30 @@ using UnityEngine.Assertions;
 
 public class WorldStreaming : MonoBehaviour
 {
-    private const int LOD_COUNT = 2;
+    private const int LOD_COUNT = 1;
 
     private static readonly float[] LOD_SWITCH_DISTANCE =
     {
-        128.0f,
-        256.0f,
-        //512.0f,
+        //128.0f,
+        //256.0f,
+        512.0f,
         //1024.0f
     };
 
     private static readonly int[] LOD_DISTANCE_PER_VERT =
     {
         1,
-        4,
+        //2,
         //16,
         //WorldChunk.SIZE / 2
     };
 
     private static readonly Color[] LOD_DEBUG_COLOR =
     {
-        Color.red,
-        new Color(1.0f, 0.7f, 0.0f),
+        //Color.red,
+        //new Color(1.0f, 0.7f, 0.0f),
         //Color.yellow,
-        //Color.green
+        Color.green
     };
 
     private const int LOD_UPDATE_SLICES = LOD_COUNT;
@@ -54,7 +54,6 @@ public class WorldStreaming : MonoBehaviour
 
     private class LoadedChunk
     {
-        public int id;
         public bool unload = false;
 
         public GameObject obj;
@@ -64,14 +63,22 @@ public class WorldStreaming : MonoBehaviour
         public int lod_active_idx = -2;
         public LoadedChunkMeshParams[] lod_mesh_params;
 
-        public NativeArray<float> heights;
-
         public bool load_started = false;
         public bool load_finalized = false;
         public JobHandle load_job;
+
+        public NativeArray<float>[] nearby_heights;
+    }
+
+    public class LoadedChunkHeightData
+    {
+        public NativeArray<float> heights;
+        public JobHandle job;
+        public int ref_count = 0;
     }
 
     private Dictionary<int, LoadedChunk> m_loaded_chunks = new Dictionary<int, LoadedChunk>();
+    private Dictionary<int, LoadedChunkHeightData> m_loaded_chunk_height_data = new Dictionary<int, LoadedChunkHeightData>();
 
     private int m_chunk_id_last = -1;
 
@@ -122,7 +129,7 @@ public class WorldStreaming : MonoBehaviour
                 LoadedChunk chunk = kvp.Value;
                 if (chunk.load_finalized && Time.frameCount % LOD_UPDATE_SLICES == chunk.lod_frame_idx)
                 {
-                    int lod = SelectActiveLod(position, chunk);
+                    int lod = SelectActiveLod(position, GetChunkCoords(kvp.Key));
                     if (lod != chunk.lod_active_idx)
                     {
                         chunk.lod_active_idx = lod;
@@ -135,6 +142,14 @@ public class WorldStreaming : MonoBehaviour
                     }
                 }
             }
+        }
+    }
+
+    public void OnDestroy()
+    {
+        foreach (KeyValuePair<int, LoadedChunkHeightData> height_data in m_loaded_chunk_height_data)
+        {
+            FreeChunkHeightDataResources(height_data.Value);
         }
     }
 
@@ -194,25 +209,7 @@ public class WorldStreaming : MonoBehaviour
         return chunks;
     }
 
-    private JobHandle ScheduleChunkLoad(int chunk_id, out LoadedChunkMeshParams[] mesh_params, out NativeArray<float> heights)
-    {
-        Vector2 position = GetChunkCoords(chunk_id);
-        mesh_params = new LoadedChunkMeshParams[LOD_COUNT];
-        JobHandle chunk_gen_handle = WorldChunk.ScheduleChunkGeneration((int)position.x, (int)position.y, m_world.gen.GetPerlin(), out heights);
-
-        for (int i = 0; i < LOD_COUNT; ++i)
-        {
-            mesh_params[i] = new LoadedChunkMeshParams();
-            JobHandle mesh_handle = WorldChunk.ScheduleChunkMeshGeneration(heights, LOD_DISTANCE_PER_VERT[i],
-                out mesh_params[i].verts, out mesh_params[i].tris, out mesh_params[i].uvs, out mesh_params[i].normals,
-                out mesh_params[i].final_vert_count, out mesh_params[i].final_tri_count, chunk_gen_handle);
-            chunk_gen_handle = JobHandle.CombineDependencies(chunk_gen_handle, mesh_handle);
-        }
-
-        return chunk_gen_handle;
-    }
-
-    private void FreeChunkResources(LoadedChunk chunk)
+    private void FreeChunkMeshCreationResources(LoadedChunk chunk)
     {
         foreach (LoadedChunkMeshParams param in chunk.lod_mesh_params)
         {
@@ -223,12 +220,41 @@ public class WorldStreaming : MonoBehaviour
         }
 
         chunk.lod_mesh_params = null;
-        chunk.heights.Dispose();
+        chunk.nearby_heights = null;
     }
 
-    private int SelectActiveLod(Vector3 pos, LoadedChunk chunk)
+    private void FreeChunkHeightDataResources(LoadedChunkHeightData data)
     {
-        Vector2 chunk_coords = GetChunkCoords(chunk.id);
+        data.heights.Dispose();
+    }
+
+    private void RemoveNeighbouringRefCount(int start_chunk_id)
+    {
+        Vector2 position = GetChunkCoords(start_chunk_id);
+
+        for (int z = -1; z <= 1; ++z)
+        {
+            for (int x = -1; x <= 1; ++x)
+            {
+                float chunk_x = position.x + x * WorldChunk.SIZE;
+                float chunk_z = position.y + z * WorldChunk.SIZE;
+                int chunk_id = GetChunkId(chunk_x, chunk_z);
+
+                LoadedChunkHeightData height_data;
+                if (m_loaded_chunk_height_data.TryGetValue(chunk_id, out height_data))
+                {
+                    if (--height_data.ref_count == 0)
+                    {
+                        height_data.heights.Dispose();
+                        m_loaded_chunk_height_data.Remove(chunk_id);
+                    }
+                }
+            }
+        }
+    }
+
+    private int SelectActiveLod(Vector3 pos, Vector2 chunk_coords)
+    {
         chunk_coords.x += WorldChunk.SIZE / 2.0f;
         chunk_coords.y += WorldChunk.SIZE / 2.0f;
 
@@ -254,17 +280,11 @@ public class WorldStreaming : MonoBehaviour
     {
         HashSet<int> chunks = GetTargetChunks(position);
 
-        int base_y = (0 / WorldChunk.SIZE) * WorldChunk.SIZE;
-
-        chunks.Clear();
-        chunks.Add(GetChunkId(0, base_y));
-        chunks.Add(GetChunkId(0, base_y + WorldChunk.SIZE));
-
         foreach (int chunk in chunks)
         {
             if (!m_loaded_chunks.ContainsKey(chunk))
             {
-                m_loaded_chunks.Add(chunk, new LoadedChunk { id = chunk });
+                m_loaded_chunks.Add(chunk, new LoadedChunk());
             }
         }
 
@@ -297,52 +317,100 @@ public class WorldStreaming : MonoBehaviour
 
         List<int> unloaded_chunks = new List<int>();
 
-        foreach (KeyValuePair<int, LoadedChunk> chunk in m_loaded_chunks)
+        foreach (KeyValuePair<int, LoadedChunk> kvp in m_loaded_chunks)
         {
-            if (!chunk.Value.load_started)
+            LoadedChunk chunk = kvp.Value;
+            if (!chunk.load_started)
             {
-                chunk.Value.load_started = true;
-                chunk.Value.load_job = ScheduleChunkLoad(chunk.Key, out chunk.Value.lod_mesh_params, out chunk.Value.heights);
-            }
-            else if (chunk.Value.unload)
-            {
-                if (chunk.Value.load_finalized) // finalized, we only need to free the objects
+                chunk.load_started = true;
+                chunk.nearby_heights = new NativeArray<float>[9];
+
+                Vector2 position = GetChunkCoords(kvp.Key);
+                NativeArray<JobHandle> chunk_gen_handles = new NativeArray<JobHandle>(9, Allocator.Temp);
+
+                int i = 0;
+                for (int z = -1; z <= 1; ++z)
                 {
-                    Destroy(chunk.Value.obj);
-                    foreach (LodInfo info in chunk.Value.lod_info)
+                    for (int x = -1; x <= 1; ++x)
+                    {
+                        float chunk_x = position.x + x * WorldChunk.SIZE;
+                        float chunk_z = position.y + z * WorldChunk.SIZE;
+                        int chunk_id = GetChunkId(chunk_x, chunk_z);
+
+                        LoadedChunkHeightData height_data;
+
+                        if (!m_loaded_chunk_height_data.TryGetValue(chunk_id, out height_data))
+                        {
+                            height_data = new LoadedChunkHeightData();
+                            height_data.job = m_world.gen.ScheduleBaseTerrainGeneration((int)chunk_x, (int)chunk_z, WorldChunk.SIZE_WITH_BORDER, out height_data.heights);
+                            m_loaded_chunk_height_data.Add(chunk_id, height_data);
+                        }
+
+                        chunk_gen_handles[i] = height_data.job;
+                        chunk.nearby_heights[i++] = height_data.heights;
+                        ++height_data.ref_count;
+                    }
+                }
+
+                JobHandle chunk_gen_handle = JobHandle.CombineDependencies(chunk_gen_handles);
+                chunk_gen_handles.Dispose();
+
+                NativeArray<JobHandle> mesh_gen_handles = new NativeArray<JobHandle>(LOD_COUNT, Allocator.Temp);
+
+                chunk.lod_mesh_params = new LoadedChunkMeshParams[LOD_COUNT];
+
+                for (int lod = 0; lod < LOD_COUNT; ++lod)
+                {
+                    LoadedChunkMeshParams param = new LoadedChunkMeshParams();
+                    mesh_gen_handles[lod] = WorldChunk.ScheduleChunkMeshGeneration(
+                        chunk.nearby_heights, LOD_DISTANCE_PER_VERT[lod],
+                        out param.verts, out param.tris, out param.uvs, out param.normals,
+                        out param.final_vert_count, out param.final_tri_count, chunk_gen_handle);
+                    chunk.lod_mesh_params[lod] = param;
+                }
+
+                chunk.load_job = JobHandle.CombineDependencies(mesh_gen_handles);
+                mesh_gen_handles.Dispose();
+            }
+            else if (chunk.unload)
+            {
+                if (chunk.load_finalized) // finalized, we only need to free the objects
+                {
+                    Destroy(chunk.obj);
+                    foreach (LodInfo info in chunk.lod_info)
                     {
                         Destroy(info.obj);
                     }
-                    unloaded_chunks.Add(chunk.Key);
+                    unloaded_chunks.Add(kvp.Key);
                 }
-                else if (chunk.Value.load_job.IsCompleted) // not finalized, but tasks done - we can release resources
+                else if (chunk.load_job.IsCompleted) // not finalized, but tasks done - we can release resources
                 {
-                    chunk.Value.load_job.Complete();
-                    FreeChunkResources(chunk.Value);
-                    unloaded_chunks.Add(chunk.Key);
+                    chunk.load_job.Complete();
+                    FreeChunkMeshCreationResources(chunk);
+                    unloaded_chunks.Add(kvp.Key);
                 }
             }
-            else if (!chunk.Value.load_finalized && chunk.Value.load_job.IsCompleted)
+            else if (!chunk.load_finalized && chunk.load_job.IsCompleted)
             {
-                chunk.Value.load_job.Complete();
-                chunk.Value.load_finalized = true;
+                chunk.load_job.Complete();
+                chunk.load_finalized = true;
 
-                Vector2 chunk_pos = GetChunkCoords(chunk.Key);
+                Vector2 chunk_pos = GetChunkCoords(kvp.Key);
 
-                GameObject obj = new GameObject(string.Format("Chunk{0}", chunk.Key));
+                GameObject obj = new GameObject(string.Format("Chunk{0}", kvp.Key));
                 obj.transform.parent = m_world.gameObject.transform;
                 obj.transform.position = new Vector3(chunk_pos.x, 0.0f, chunk_pos.y);
                 obj.SetActive(false);
-                chunk.Value.obj = obj;
+                chunk.obj = obj;
 
-                chunk.Value.lod_info = new LodInfo[LOD_COUNT];
+                chunk.lod_info = new LodInfo[LOD_COUNT];
 
                 for (int i = 0; i < LOD_COUNT; ++i)
                 {
-                    LoadedChunkMeshParams param = chunk.Value.lod_mesh_params[i];
-                    Assert.IsTrue(chunk.Value.lod_mesh_params.Length == LOD_COUNT);
+                    LoadedChunkMeshParams param = chunk.lod_mesh_params[i];
+                    Assert.IsTrue(chunk.lod_mesh_params.Length == LOD_COUNT);
 
-                    GameObject lod_obj = new GameObject(string.Format("Lod{1}", chunk.Key, i));
+                    GameObject lod_obj = new GameObject(string.Format("Lod{1}", kvp.Key, i));
                     lod_obj.transform.parent = obj.transform;
                     lod_obj.transform.localPosition = Vector3.zero;
                     Mesh lod_mesh = WorldChunk.FinalizeChunkMesh(param.verts, param.tris, param.uvs, param.normals,
@@ -359,15 +427,15 @@ public class WorldStreaming : MonoBehaviour
                         lod_obj.AddComponent<MeshNormalRenderer>();
                     }
 
-                    chunk.Value.lod_info[i] = new LodInfo();
-                    chunk.Value.lod_info[i].border_normals = WorldChunk.ExtractBorderNormals(param.normals);
-                    chunk.Value.lod_info[i].obj = lod_obj;
-                    chunk.Value.lod_info[i].skirts = skirt_obj;
+                    chunk.lod_info[i] = new LodInfo();
+                    chunk.lod_info[i].border_normals = WorldChunk.ExtractBorderNormals(param.normals);
+                    chunk.lod_info[i].obj = lod_obj;
+                    chunk.lod_info[i].skirts = skirt_obj;
                 }
 
-                chunk.Value.lod_frame_idx = Time.frameCount % LOD_UPDATE_SLICES;
+                chunk.lod_frame_idx = Time.frameCount % LOD_UPDATE_SLICES;
 
-                FreeChunkResources(chunk.Value);
+                FreeChunkMeshCreationResources(chunk);
             }
 
             if (Time.realtimeSinceStartup - time_start > timeslice)
@@ -378,6 +446,7 @@ public class WorldStreaming : MonoBehaviour
 
         foreach (int chunk in unloaded_chunks)
         {
+            RemoveNeighbouringRefCount(chunk);
             m_loaded_chunks.Remove(chunk);
         }
     }
