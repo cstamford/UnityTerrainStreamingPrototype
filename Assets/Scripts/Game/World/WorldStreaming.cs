@@ -7,12 +7,12 @@ using UnityEngine.Assertions;
 
 public class WorldStreaming : MonoBehaviour
 {
-    private const int LOD_COUNT = 1;
+    private const int LOD_COUNT = 2;
 
     private static readonly float[] LOD_SWITCH_DISTANCE =
     {
         128.0f,
-        //256.0f,
+        256.0f,
         //512.0f,
         //1024.0f
     };
@@ -20,7 +20,7 @@ public class WorldStreaming : MonoBehaviour
     private static readonly int[] LOD_DISTANCE_PER_VERT =
     {
         1,
-        //4,
+        4,
         //16,
         //WorldChunk.SIZE / 2
     };
@@ -28,7 +28,7 @@ public class WorldStreaming : MonoBehaviour
     private static readonly Color[] LOD_DEBUG_COLOR =
     {
         Color.red,
-        //new Color(1.0f, 0.7f, 0.0f),
+        new Color(1.0f, 0.7f, 0.0f),
         //Color.yellow,
         //Color.green
     };
@@ -41,6 +41,8 @@ public class WorldStreaming : MonoBehaviour
         public NativeArray<int> tris;
         public NativeArray<Vector2> uvs;
         public NativeArray<Vector3> normals;
+        public int final_vert_count;
+        public int final_tri_count;
     }
 
     private class LodInfo
@@ -203,7 +205,7 @@ public class WorldStreaming : MonoBehaviour
             mesh_params[i] = new LoadedChunkMeshParams();
             JobHandle mesh_handle = WorldChunk.ScheduleChunkMeshGeneration(heights, LOD_DISTANCE_PER_VERT[i],
                 out mesh_params[i].verts, out mesh_params[i].tris, out mesh_params[i].uvs, out mesh_params[i].normals,
-                chunk_gen_handle);
+                out mesh_params[i].final_vert_count, out mesh_params[i].final_tri_count, chunk_gen_handle);
             chunk_gen_handle = JobHandle.CombineDependencies(chunk_gen_handle, mesh_handle);
         }
 
@@ -220,6 +222,7 @@ public class WorldStreaming : MonoBehaviour
             param.normals.Dispose();
         }
 
+        chunk.lod_mesh_params = null;
         chunk.heights.Dispose();
     }
 
@@ -305,10 +308,10 @@ public class WorldStreaming : MonoBehaviour
             {
                 if (chunk.Value.load_finalized) // finalized, we only need to free the objects
                 {
-                    Object.Destroy(chunk.Value.obj);
+                    Destroy(chunk.Value.obj);
                     foreach (LodInfo info in chunk.Value.lod_info)
                     {
-                        Object.Destroy(info.obj);
+                        Destroy(info.obj);
                     }
                     unloaded_chunks.Add(chunk.Key);
                 }
@@ -342,7 +345,8 @@ public class WorldStreaming : MonoBehaviour
                     GameObject lod_obj = new GameObject(string.Format("Lod{1}", chunk.Key, i));
                     lod_obj.transform.parent = obj.transform;
                     lod_obj.transform.localPosition = Vector3.zero;
-                    Mesh lod_mesh = WorldChunk.FinalizeChunkMesh(param.verts, param.tris, param.uvs, param.normals);
+                    Mesh lod_mesh = WorldChunk.FinalizeChunkMesh(param.verts, param.tris, param.uvs, param.normals,
+                        param.final_vert_count, param.final_tri_count);
                     AddChunkRendering(lod_obj, i, lod_mesh);
 
                     GameObject skirt_obj = new GameObject("Skirt");

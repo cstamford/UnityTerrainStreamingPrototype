@@ -149,8 +149,8 @@ public class WorldChunk
     }
 
     public static JobHandle ScheduleChunkMeshGeneration(NativeArray<float> heights, int distance_per_vert,
-        out NativeArray<Vector3> verts, out NativeArray<int> tris,  out NativeArray<Vector2> uvs, out NativeArray<Vector3> normals,
-        JobHandle depends = default)
+        out NativeArray<Vector3> verts, out NativeArray<int> tris, out NativeArray<Vector2> uvs, out NativeArray<Vector3> normals,
+        out int final_vert_count, out int final_tri_count, JobHandle depends = default)
     {
         ChunkMeshLayoutInfo info = CalculateChunkMeshLayoutInfo(distance_per_vert, true);
 
@@ -179,17 +179,22 @@ public class WorldChunk
         };
 
         JobHandle generate_chunk_normals_job_handle = generate_chunk_normals_job.Schedule(generate_mesh_job_handle);
+
+        ChunkMeshLayoutInfo info_without_trim = CalculateChunkMeshLayoutInfo(distance_per_vert, false);
+        final_vert_count = info_without_trim.vert_count;
+        final_tri_count = info_without_trim.tri_count;
+
         return generate_chunk_normals_job_handle;
     }
 
-    public static Mesh FinalizeChunkMesh(NativeArray<Vector3> verts, NativeArray<int> tris, NativeArray<Vector2> uvs, NativeArray<Vector3> normals)
+    public static Mesh FinalizeChunkMesh(NativeArray<Vector3> verts, NativeArray<int> tris, NativeArray<Vector2> uvs, NativeArray<Vector3> normals,
+        int final_vert_count, int final_tri_count)
     {
-        ChunkMeshLayoutInfo info = CalculateChunkMeshLayoutInfo((int)(SIZE_WITH_BORDER / (Mathf.Sqrt(verts.Length) - TRIM)), false);
         Mesh mesh = new Mesh();
-        mesh.SetVertices(verts, 0, info.vert_count);
-        mesh.SetUVs(0, uvs, 0, info.vert_count);
-        mesh.SetNormals(normals, 0, info.vert_count);
-        mesh.SetTriangles(tris.Slice(0, info.tri_count).ToArray(), 0);
+        mesh.SetVertices(verts, 0, final_vert_count);
+        mesh.SetUVs(0, uvs, 0, final_vert_count);
+        mesh.SetNormals(normals, 0, final_vert_count);
+        mesh.SetTriangles(tris.Slice(0, final_tri_count).ToArray(), 0);
         return mesh;
     }
 
