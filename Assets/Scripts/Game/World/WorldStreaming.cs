@@ -11,10 +11,10 @@ public class WorldStreaming : MonoBehaviour
 
     private static readonly float[] CHUNK_LOD_DIST =
     {
-        WorldChunk.SIZE * 2,
-        WorldChunk.SIZE * 4,
-        WorldChunk.SIZE * 8,
-        WorldChunk.SIZE * 16
+        128.0f,
+        256.0f,
+        512.0f,
+        1024.0f
     };
 
     private const int LOD_UPDATE_SLICES = LOD_COUNT;
@@ -27,15 +27,25 @@ public class WorldStreaming : MonoBehaviour
         public NativeArray<Vector3> normals;
     }
 
+    private class LodInfo
+    {
+        public GameObject obj;
+        public GameObject skirts;
+        public Vector3[] border_normals;
+    }
+
     private class LoadedChunk
     {
         public int id;
         public bool unload = false;
 
         public GameObject obj;
-        public GameObject[] lods;
-        public int lod_frame_idx;
-        public LoadedChunkMeshParams[] mesh_params;
+
+        public LodInfo[] lod_info;
+        public int lod_frame_idx = -1;
+        public int lod_active_idx = -2;
+        public LoadedChunkMeshParams[] lod_mesh_params;
+
         public NativeArray<float> heights;
 
         public bool load_started = false;
@@ -87,12 +97,45 @@ public class WorldStreaming : MonoBehaviour
 
         using (s_lod_marker.Auto())
         {
-            foreach (KeyValuePair<int, LoadedChunk> chunk in m_loaded_chunks)
+            foreach (KeyValuePair<int, LoadedChunk> kvp in m_loaded_chunks)
             {
-                if (chunk.Value.load_finalized &&
-                    Time.frameCount % LOD_UPDATE_SLICES == chunk.Value.lod_frame_idx)
+                LoadedChunk chunk = kvp.Value;
+                if (chunk.load_finalized && Time.frameCount % LOD_UPDATE_SLICES == chunk.lod_frame_idx)
                 {
-                    SelectActiveLod(position, chunk.Value);
+                    int lod = SelectActiveLod(position, chunk);
+
+                    if (lod != chunk.lod_active_idx)
+                    {
+                        chunk.obj.SetActive(lod != -1);
+
+                        for (int i = 0; i < chunk.lod_info.Length; ++i)
+                        {
+                            chunk.lod_info[i].obj.SetActive(i == lod);
+                        }
+
+                        if (lod != -1)
+                        {
+                            WorldChunk.ApplyCorrectedNormals(GetChunkConnections(chunk.id));
+
+                            LodInfo lod_info = chunk.lod_info[lod];
+                            Mesh lod_mesh = lod_info.obj.GetComponent<MeshFilter>().mesh;
+
+                            if (lod_info.skirts == null)
+                            {
+                                GameObject skirt_obj = new GameObject("Skirt");
+                                skirt_obj.transform.parent = lod_info.obj.transform;
+                                skirt_obj.transform.localPosition = new Vector3(0.0f, 0.0f, 0.0f);
+                                AddChunkRendering(skirt_obj, lod, WorldChunk.CreateChunkSkirting(lod_mesh.vertices, lod_mesh.normals));
+                                lod_info.skirts = skirt_obj;
+                            }
+                            else
+                            {
+                                lod_info.skirts.GetComponent<MeshFilter>().mesh = WorldChunk.CreateChunkSkirting(lod_mesh.vertices, lod_mesh.normals);
+                            }
+                        }
+
+                        chunk.lod_active_idx = lod;
+                    }
                 }
             }
         }
@@ -168,8 +211,8 @@ public class WorldStreaming : MonoBehaviour
             {
                 case 0: distance_per_vert = 1; break;
                 case 1: distance_per_vert = 4; break;
-                case 2: distance_per_vert = 8; break;
-                case 3: distance_per_vert = 16; break;
+                case 2: distance_per_vert = 16; break;
+                case 3: distance_per_vert = 32; break;
                 default: Assert.IsTrue(false); break;
             }
 
@@ -185,7 +228,7 @@ public class WorldStreaming : MonoBehaviour
 
     private void FreeChunkResources(LoadedChunk chunk)
     {
-        foreach (LoadedChunkMeshParams param in chunk.mesh_params)
+        foreach (LoadedChunkMeshParams param in chunk.lod_mesh_params)
         {
             param.verts.Dispose();
             param.tris.Dispose();
@@ -196,7 +239,7 @@ public class WorldStreaming : MonoBehaviour
         chunk.heights.Dispose();
     }
 
-    private void SelectActiveLod(Vector3 pos, LoadedChunk chunk)
+    private int SelectActiveLod(Vector3 pos, LoadedChunk chunk)
     {
         Vector2 chunk_coords = GetChunkCoords(chunk.id);
         chunk_coords.x += WorldChunk.SIZE / 2.0f;
@@ -217,12 +260,7 @@ public class WorldStreaming : MonoBehaviour
             }
         }
 
-        chunk.obj.SetActive(selected_lod_idx != -1);
-
-        for (int i = 0; i < chunk.lods.Length; ++i)
-        {
-            chunk.lods[i].SetActive(i == selected_lod_idx);
-        }
+        return selected_lod_idx;
     }
 
     private void HandleZoneTransition(Vector3 position)
@@ -246,6 +284,31 @@ public class WorldStreaming : MonoBehaviour
         }
     }
 
+    private void AddChunkRendering(GameObject obj, int lod, Mesh mesh)
+    {
+        MeshRenderer meshRenderer = obj.AddComponent<MeshRenderer>();
+        meshRenderer.sharedMaterial = m_terrain_material;
+
+        if (m_draw_lod)
+        {
+            Color color = Color.black;
+
+            switch (lod)
+            {
+                case 0: color = Color.red; break;
+                case 1: color = new Color(1.0f, 0.7f, 0.0f); break;
+                case 2: color = Color.yellow; break;
+                case 3: color = Color.green; break;
+                default: Assert.IsTrue(false); break;
+            }
+
+            meshRenderer.material.SetColor("_BaseColor", color);
+        }
+
+        MeshFilter meshFilter = obj.AddComponent<MeshFilter>();
+        meshFilter.mesh = mesh;
+    }
+
     private void HandleZoneFinalization(float timeslice)
     {
         float time_start = Time.realtimeSinceStartup;
@@ -257,16 +320,16 @@ public class WorldStreaming : MonoBehaviour
             if (!chunk.Value.load_started)
             {
                 chunk.Value.load_started = true;
-                chunk.Value.load_job = ScheduleChunkLoad(chunk.Key, out chunk.Value.mesh_params, out chunk.Value.heights);
+                chunk.Value.load_job = ScheduleChunkLoad(chunk.Key, out chunk.Value.lod_mesh_params, out chunk.Value.heights);
             }
             else if (chunk.Value.unload)
             {
                 if (chunk.Value.load_finalized) // finalized, we only need to free the objects
                 {
                     Object.Destroy(chunk.Value.obj);
-                    foreach (Object obj in chunk.Value.lods)
+                    foreach (LodInfo info in chunk.Value.lod_info)
                     {
-                        Object.Destroy(obj);
+                        Object.Destroy(info.obj);
                     }
                     unloaded_chunks.Add(chunk.Key);
                 }
@@ -289,40 +352,22 @@ public class WorldStreaming : MonoBehaviour
                 obj.transform.position = new Vector3(chunk_pos.x, 0.0f, chunk_pos.y);
                 chunk.Value.obj = obj;
 
-                chunk.Value.lods = new GameObject[LOD_COUNT];
+                chunk.Value.lod_info = new LodInfo[LOD_COUNT];
 
                 for (int i = 0; i < LOD_COUNT; ++i)
                 {
+                    LoadedChunkMeshParams param = chunk.Value.lod_mesh_params[i];
+                    Assert.IsTrue(chunk.Value.lod_mesh_params.Length == LOD_COUNT);
+
                     GameObject lod_obj = new GameObject(string.Format("Lod{1}", chunk.Key, i));
                     lod_obj.transform.parent = obj.transform;
                     lod_obj.transform.localPosition = new Vector3(0.0f, 0.0f, 0.0f);
+                    Mesh lod_mesh = WorldChunk.FinalizeChunkMesh(param.verts, param.tris, param.uvs, param.normals);
+                    AddChunkRendering(lod_obj, i, lod_mesh);
 
-                    MeshRenderer meshRenderer = lod_obj.AddComponent<MeshRenderer>();
-                    meshRenderer.sharedMaterial = m_terrain_material;
-
-                    if (m_draw_lod)
-                    {
-                        Color color = Color.black;
-
-                        switch (i)
-                        {
-                            case 0: color = Color.red; break;
-                            case 1: color = new Color(1.0f, 0.7f, 0.0f); break;
-                            case 2: color = Color.yellow; break;
-                            case 3: color = Color.green; break;
-                            default: Assert.IsTrue(false); break;
-                        }
-
-                        meshRenderer.material.SetColor("_BaseColor", color);
-                    }
-
-                    Assert.IsTrue(chunk.Value.mesh_params.Length == LOD_COUNT);
-                    LoadedChunkMeshParams param = chunk.Value.mesh_params[i];
-
-                    MeshFilter meshFilter = lod_obj.AddComponent<MeshFilter>();
-                    meshFilter.mesh = WorldChunk.FinalizeChunkMesh(param.verts, param.tris, param.uvs, param.normals);
-
-                    chunk.Value.lods[i] = lod_obj;
+                    chunk.Value.lod_info[i] = new LodInfo();
+                    chunk.Value.lod_info[i].border_normals = WorldChunk.ExtractBorderNormals(param.normals);
+                    chunk.Value.lod_info[i].obj = lod_obj;
                 }
 
                 chunk.Value.lod_frame_idx = Time.frameCount % LOD_UPDATE_SLICES;
@@ -340,5 +385,10 @@ public class WorldStreaming : MonoBehaviour
         {
             m_loaded_chunks.Remove(chunk);
         }
+    }
+
+    private List<WorldChunk.ChunkConnection> GetChunkConnections(int chunk_id)
+    {
+        return new List<WorldChunk.ChunkConnection>();
     }
 }
