@@ -7,29 +7,29 @@ using UnityEngine.Assertions;
 
 public class WorldStreaming : MonoBehaviour
 {
-    private const int LOD_COUNT = 1;
+    private const int LOD_COUNT = 4;
 
     private static readonly float[] LOD_SWITCH_DISTANCE =
     {
-        //128.0f,
-        //256.0f,
+        128.0f,
+        256.0f,
         512.0f,
-        //1024.0f
+        1024.0f
     };
 
     private static readonly int[] LOD_DISTANCE_PER_VERT =
     {
         1,
-        //2,
-        //16,
-        //WorldChunk.SIZE / 2
+        2,
+        16,
+        WorldChunk.SIZE / 2
     };
 
     private static readonly Color[] LOD_DEBUG_COLOR =
     {
-        //Color.red,
-        //new Color(1.0f, 0.7f, 0.0f),
-        //Color.yellow,
+        Color.red,
+        new Color(1.0f, 0.7f, 0.0f),
+        Color.yellow,
         Color.green
     };
 

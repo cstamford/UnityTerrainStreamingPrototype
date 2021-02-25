@@ -6,10 +6,8 @@ using UnityEngine.Assertions;
 
 public class WorldChunk
 {
-    public const int SIZE = 128;
+    public const int SIZE = 64;
     public const int SIZE_WITH_BORDER = SIZE + 1;
-
-    private const int TRIM = 2;
 
     [BurstCompile]
     private struct GenerateChunkMeshJob : IJob
@@ -62,13 +60,15 @@ public class WorldChunk
                 }
             }
 
-            /*
-            CreateCornersTape(verts, ref vert_counter, tris, ref tri_counter, heights, distance_per_vert,
-                CreateTopRowTape(verts, ref vert_counter, tris, ref tri_counter, heights, distance_per_vert),
-                CreateBottomRowTape(verts, ref vert_counter, tris, ref tri_counter, heights, distance_per_vert),
-                CreateLeftColumnTape(verts, ref vert_counter, tris, ref tri_counter, heights, distance_per_vert),
-                CreateRightColumnTape(verts, ref vert_counter, tris, ref tri_counter, heights, distance_per_vert));
-            */
+            CreateCornersTape(verts, ref vert_counter, tris, ref tri_counter, distance_per_vert,
+                heights_northeast, heights_northwest, heights_southeast, heights_southwest,
+                CreateTopRowTape(verts, ref vert_counter, tris, ref tri_counter, distance_per_vert, heights_north),
+                CreateBottomRowTape(verts, ref vert_counter, tris, ref tri_counter, distance_per_vert, heights_south),
+                CreateLeftColumnTape(verts, ref vert_counter, tris, ref tri_counter, distance_per_vert, heights_west),
+                CreateRightColumnTape(verts, ref vert_counter, tris, ref tri_counter, distance_per_vert, heights_east));
+
+            Assert.IsTrue(vert_counter == verts.Length);
+            Assert.IsTrue(tri_counter == tris.Length);
         }
     }
 
@@ -132,6 +132,8 @@ public class WorldChunk
 
         GenerateChunkMeshJob generate_mesh_job = new GenerateChunkMeshJob()
         {
+            // Our orientation: North = Z+, south=Z-, east=X+, west=X-
+
             heights_north       = heights[1],
             heights_northeast   = heights[2],
             heights_east        = heights[5],
@@ -172,10 +174,10 @@ public class WorldChunk
         int final_vert_count, int final_tri_count)
     {
         Mesh mesh = new Mesh();
-        mesh.SetVertices(verts);//, 0, final_vert_count);
-        mesh.SetUVs(0, uvs);//, 0, final_vert_count);
-        mesh.SetNormals(normals);//, 0, final_vert_count);
-        mesh.SetTriangles(tris.ToArray(), 0); //Slice(0, final_tri_count).ToArray(), 0);
+        mesh.SetVertices(verts, 0, final_vert_count);
+        mesh.SetUVs(0, uvs, 0, final_vert_count);
+        mesh.SetNormals(normals, 0, final_vert_count);
+        mesh.SetTriangles(tris.Slice(0, final_tri_count).ToArray(), 0);
         return mesh;
     }
 
@@ -220,7 +222,7 @@ public class WorldChunk
         uvs[vert_counter] = new Vector2(u, 0.0f);
         normals[vert_counter++] = n;
 
-        verts[vert_counter] = new Vector3(v.x, v.y - 5.0f, v.z);
+        verts[vert_counter] = new Vector3(v.x, v.y - SIZE / 4, v.z);
         uvs[vert_counter] = new Vector2(u, 1.0f);
         normals[vert_counter++] = n;
     }
@@ -303,22 +305,22 @@ public class WorldChunk
         Assert.IsTrue(tri_counter == tris.Length);
 
         Mesh mesh = new Mesh();
-        //mesh.SetVertices(verts);
-        //mesh.SetUVs(0, uvs);
-        //mesh.SetNormals(normals);
-        //mesh.SetTriangles(tris.ToArray(), 0);
+        mesh.SetVertices(verts);
+        mesh.SetUVs(0, uvs);
+        mesh.SetNormals(normals);
+        mesh.SetTriangles(tris.ToArray(), 0);
         return mesh;
     }
 
-    private static int CreateTopRowTape(NativeArray<Vector3> verts, ref int vert_counter, NativeArray<int> tris, ref int tri_counter, NativeArray<float> heights, int distance_per_vert)
+    private static int CreateTopRowTape(NativeArray<Vector3> verts, ref int vert_counter, NativeArray<int> tris, ref int tri_counter, int distance_per_vert, NativeArray<float> heights_north)
     {
         int top_row_vert_counter = vert_counter;
         int top_row_vert_counter_start = vert_counter;
 
         for (int x = 0; x < SIZE_WITH_BORDER; x += distance_per_vert)
         {
-            int idx = x + 1;
-            verts[vert_counter++] = new Vector3(x, heights[idx], -1);
+            int idx = x + (SIZE_WITH_BORDER - distance_per_vert - 1) * SIZE_WITH_BORDER;
+            verts[vert_counter++] = new Vector3(x, heights_north[idx], -distance_per_vert);
         }
 
         int stride = SIZE / distance_per_vert;
@@ -332,15 +334,15 @@ public class WorldChunk
         return top_row_vert_counter_start;
     }
 
-    private static int CreateBottomRowTape(NativeArray<Vector3> verts, ref int vert_counter, NativeArray<int> tris, ref int tri_counter, NativeArray<float> heights, int distance_per_vert)
+    private static int CreateBottomRowTape(NativeArray<Vector3> verts, ref int vert_counter, NativeArray<int> tris, ref int tri_counter, int distance_per_vert, NativeArray<float> heights_south)
     {
         int bottom_row_vert_counter = vert_counter;
         int bottom_row_vert_counter_start = vert_counter;
 
         for (int x = 0; x < SIZE_WITH_BORDER; x += distance_per_vert)
         {
-            int idx = (x + 1) + (SIZE_WITH_BORDER + TRIM - 1) * (SIZE_WITH_BORDER + TRIM);
-            verts[vert_counter++] = new Vector3(x, heights[idx], SIZE_WITH_BORDER);
+            int idx = x + (SIZE_WITH_BORDER * distance_per_vert);
+            verts[vert_counter++] = new Vector3(x, heights_south[idx], SIZE + distance_per_vert);
         }
 
         int stride = SIZE / distance_per_vert;
@@ -355,7 +357,7 @@ public class WorldChunk
         return bottom_row_vert_counter_start;
     }
 
-    private static int CreateLeftColumnTape(NativeArray<Vector3> verts, ref int vert_counter, NativeArray<int> tris, ref int tri_counter, NativeArray<float> heights, int distance_per_vert)
+    private static int CreateLeftColumnTape(NativeArray<Vector3> verts, ref int vert_counter, NativeArray<int> tris, ref int tri_counter, int distance_per_vert, NativeArray<float> heights_west)
     {
         int left_column_vert_counter = vert_counter;
         int left_column_vert_counter_start = vert_counter;
@@ -364,8 +366,8 @@ public class WorldChunk
 
         for (int z = 0; z < SIZE_WITH_BORDER; z += distance_per_vert)
         {
-            int idx = (z + 1) * (SIZE_WITH_BORDER + TRIM);
-            verts[vert_counter++] = new Vector3(-1, heights[idx], z);
+            int idx = (SIZE_WITH_BORDER - distance_per_vert - 1) + z * SIZE_WITH_BORDER;
+            verts[vert_counter++] = new Vector3(-distance_per_vert, heights_west[idx], z);
         }
 
         for (int z = 0; z < stride; ++z)
@@ -379,15 +381,15 @@ public class WorldChunk
         return left_column_vert_counter_start;
     }
 
-    private static int CreateRightColumnTape(NativeArray<Vector3> verts, ref int vert_counter, NativeArray<int> tris, ref int tri_counter, NativeArray<float> heights, int distance_per_vert)
+    private static int CreateRightColumnTape(NativeArray<Vector3> verts, ref int vert_counter, NativeArray<int> tris, ref int tri_counter, int distance_per_vert, NativeArray<float> heights_east)
     {
         int right_column_vert_counter = vert_counter;
         int right_column_vert_counter_start = right_column_vert_counter;
 
         for (int z = 0; z < SIZE_WITH_BORDER; z += distance_per_vert)
         {
-            int idx = (SIZE_WITH_BORDER + TRIM - 1) + (z + 1) * (SIZE_WITH_BORDER + TRIM);
-            verts[vert_counter++] = new Vector3(SIZE_WITH_BORDER, heights[idx], z);
+            int idx = z * SIZE_WITH_BORDER + distance_per_vert;
+            verts[vert_counter++] = new Vector3(SIZE + distance_per_vert, heights_east[idx], z);
         }
 
         int stride = SIZE / distance_per_vert;
@@ -403,25 +405,44 @@ public class WorldChunk
         return right_column_vert_counter_start;
     }
 
-    private static void CreateCornersTape(NativeArray<Vector3> verts, ref int vert_counter, NativeArray<int> tris, ref int tri_counter, NativeArray<float> heights, int distance_per_vert,
+    private static void CreateCornersTape(NativeArray<Vector3> verts, ref int vert_counter, NativeArray<int> tris, ref int tri_counter, int distance_per_vert,
+        NativeArray<float> heights_northeast, NativeArray<float> heights_northwest, NativeArray<float> heights_southeast, NativeArray<float> heights_southwest,
         int top_row, int bottom_row, int left_column, int right_column)
     {
-        /*
+        int stride = SIZE / distance_per_vert + 1;
+
         int top_left = vert_counter++;
-        verts[top_left] = new Vector3(-1, heights[0], -1);
+        int nw_idx = (SIZE_WITH_BORDER - distance_per_vert - 1) + (SIZE_WITH_BORDER - distance_per_vert - 1) * SIZE_WITH_BORDER;
+        verts[top_left] = new Vector3(-distance_per_vert, heights_northwest[nw_idx], -distance_per_vert);
         MakeFace(top_left, top_row, 0, left_column, tris, ref tri_counter);
 
         int top_right = vert_counter++;
-        verts[top_right] = new Vector3(CHUNK_SIZE_WITH_BORDER, heights[CHUNK_SIZE_WITH_NORMAL_BLENDING - 1], -1);
-        MakeFace(top_row + (CHUNK_SIZE_WITH_BORDER - 1), top_right, right_column, CHUNK_SIZE_WITH_BORDER - 1, tris, ref tri_counter);
+        int ne_idx = distance_per_vert + (SIZE_WITH_BORDER - distance_per_vert - 1) * SIZE_WITH_BORDER;
+        verts[top_right] = new Vector3(SIZE + distance_per_vert, heights_northeast[ne_idx], -distance_per_vert);
+        MakeFace(top_row + stride - 1, top_right, right_column, stride - 1, tris, ref tri_counter);
 
         int bottom_right = vert_counter++;
-        verts[bottom_right] = new Vector3(CHUNK_SIZE_WITH_BORDER, heights[heights.Length - 1], CHUNK_SIZE_WITH_BORDER);
-        MakeFace(CHUNK_SIZE_WITH_BORDER * CHUNK_SIZE_WITH_BORDER - 1, right_column + (CHUNK_SIZE_WITH_BORDER - 1), bottom_right, bottom_row + (CHUNK_SIZE_WITH_BORDER - 1), tris, ref tri_counter);
+        int se_idx = distance_per_vert + distance_per_vert * SIZE_WITH_BORDER;
+        verts[bottom_right] = new Vector3(SIZE + distance_per_vert, heights_southeast[se_idx], SIZE + distance_per_vert);
+        MakeFace(bottom_right, bottom_row + stride - 1, stride * stride - 1, right_column + stride - 1, tris, ref tri_counter);
+
+        /*
+        Debug.DrawLine(verts[bottom_right], verts[bottom_right] + Vector3.up, Color.red, 100.0f);
+        Debug.DrawLine(verts[bottom_row + stride - 1], verts[bottom_row + stride - 1] + Vector3.up, Color.green, 100.0f);
+        Debug.DrawLine(verts[stride * stride - 1], verts[stride * stride - 1] + Vector3.up, Color.blue, 100.0f);
+        Debug.DrawLine(verts[right_column + stride - 1], verts[right_column + stride - 1] + Vector3.up, Color.yellow, 100.0f);
+        */
 
         int bottom_left = vert_counter++;
-        verts[bottom_left] = new Vector3(-1, heights[heights.Length - CHUNK_SIZE_WITH_NORMAL_BLENDING], CHUNK_SIZE_WITH_BORDER);
-        MakeFace(left_column + (CHUNK_SIZE_WITH_BORDER - 1), (CHUNK_SIZE_WITH_BORDER - 1) * CHUNK_SIZE_WITH_BORDER, bottom_row, bottom_left, tris, ref tri_counter);
+        int sw_idx = SIZE_WITH_BORDER - distance_per_vert - 1 + distance_per_vert * SIZE_WITH_BORDER;
+        verts[bottom_left] = new Vector3(-distance_per_vert, heights_southwest[sw_idx], SIZE + distance_per_vert);
+        MakeFace(bottom_row, bottom_left, left_column + stride - 1, (stride - 1) * stride, tris, ref tri_counter);
+
+        /*
+        Debug.DrawLine(verts[bottom_row], verts[bottom_row] + Vector3.up, Color.red, 100.0f);
+        Debug.DrawLine(verts[bottom_left], verts[bottom_left] + Vector3.up, Color.green, 100.0f);
+        Debug.DrawLine(verts[left_column + stride - 1], verts[left_column + stride - 1] + Vector3.up, Color.blue, 100.0f);
+        Debug.DrawLine(verts[(stride - 1) * stride], verts[(stride - 1) * stride] + Vector3.up, Color.yellow, 100.0f);
         */
     }
 
@@ -437,7 +458,7 @@ public class WorldChunk
 
         if (trim)
         {
-            vert_count_one_row += TRIM;
+            vert_count_one_row += 2;
         }
 
         int vert_count = vert_count_one_row * vert_count_one_row;
